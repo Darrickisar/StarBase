@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  What linux.sb answers for GET /search when nobody is signed in. Captured from
+  the live site: the route returns 200 and swaps the whole panel for the 「消息」
+  card, so a search that is simply parsed for rows looks like "no results"
+  instead of "sign in first".
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>消息 - LINUX SB</title></head>
+<body>
+<main class="wrap">
+  <div class="forum-layout forum-layout-has-sidebar">
+    <div class="forum-main">
+      <div class="main-panel">
+        <div class="form-panel form-error-panel"><h2>消息</h2><p>请登录后操作</p></div>
+      </div>
+    </div>
+    <aside class="sidebar">
+      <div class="card sidebar-card user-card">
+        <div class="user-name">访客</div>
+        <div class="side-auth"><a href="/login?redirect=%2Fsearch">登录</a><a href="/register">注册</a></div>
+      </div>
+    </aside>
+  </div>
+</main>
+</body>
+</html>

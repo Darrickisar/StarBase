@@ -1,0 +1,157 @@
+<!doctype html>
+<!--
+  A signed-in view of a topic's reply list. linux.sb hides the comment section
+  from guests ("评论区登录可见"), so this page is built by hand out of the exact
+  markup the site's own scripts operate on: `li.post-item.post-entry` rows
+  carrying `id="post-<replyId>"` and `data-floor`, quote references as
+  `?floor=` / `?replyid=` links or an "@某人 #12" line, and the per-comment
+  `.donate-reaction-count` badge. Keep it in step with app/assets/plugins.js.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>热评规则测试帖 - LINUX SB</title></head>
+<body>
+<div class="wrap">
+  <h1 class="post-topic-title">热评规则测试帖</h1>
+  <div class="breadcrumb"><a href="/forum/3">技术交流</a></div>
+  <ul class="post-list topic-post-list">
+
+    <li class="post-item post-entry" id="post-1">
+      <div class="post-avatar"><a href="/user/1"><img class="avatar-img" src="/app/avatars/a1.svg" alt="站长"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/1">站长</a>
+          <span class="post-user-group user-uid-badge"><span class="user-uid-badge-group-name">建设者</span><span class="user-uid-badge-uid">UID 1</span></span>
+          <div class="post-meta"><span class="post-time">2026-08-20</span></div>
+        </div></div>
+        <div class="donate-area" data-donate-area="1"><div class="donate-actions">
+          <a class="icon-action donate-topic-reaction-action" href="/donate?topic_id=9" data-donate-reaction data-reply-id=""><span class="donate-topic-reaction-count" data-donate-topic-like-count>3</span><span class="donate-reaction-label">点赞打赏</span></a>
+        </div></div>
+        <div class="post-content"><p>楼主正文：说说你们怎么看。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-2" data-floor="1">
+      <div class="post-avatar"><a href="/user/11"><img class="avatar-img" src="/app/avatars/a2.svg" alt="甲"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/11">甲</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=1">#1</a><span class="post-time">2026-08-20 10:01</span></div>
+        </div></div>
+        <div class="post-content"><p>我先来一个观点，等着被反驳。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-3" data-floor="2">
+      <div class="post-avatar"><a href="/user/12"><img class="avatar-img" src="/app/avatars/a3.svg" alt="乙"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/12">乙</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=2">#2</a><span class="post-time">2026-08-20 10:05</span></div>
+        </div></div>
+        <div class="donate-area" data-donate-area="1"><div class="donate-actions">
+          <a class="icon-action donate-reaction-action active" href="/donate?reply_id=3" data-donate-reaction data-reply-id="3" data-liked="1" data-coined="0"><span class="donate-reaction-count">12</span><span class="donate-reaction-label">点赞打赏</span></a>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 不同意，理由如下。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-4" data-floor="3">
+      <div class="post-avatar"><a href="/user/13"><img class="avatar-img" src="/app/avatars/a4.svg" alt="丙"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/13">丙</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=3">#3</a><span class="post-time">2026-08-20 10:07</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 我站楼上。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-5" data-floor="4">
+      <div class="post-avatar"><a href="/user/14"><img class="avatar-img" src="/app/avatars/a5.svg" alt="丁"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/14">丁</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=4">#4</a><span class="post-time">2026-08-20 10:09</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 补充一点。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-6" data-floor="5">
+      <div class="post-avatar"><a href="/user/15"><img class="avatar-img" src="/app/avatars/a6.svg" alt="戊"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/15">戊</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=5">#5</a><span class="post-time">2026-08-20 10:12</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 有数据吗。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-7" data-floor="6">
+      <div class="post-avatar"><a href="/user/16"><img class="avatar-img" src="/app/avatars/a7.svg" alt="己"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/16">己</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=6">#6</a><span class="post-time">2026-08-20 10:15</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 我也这么想。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-8" data-floor="7">
+      <div class="post-avatar"><a href="/user/17"><img class="avatar-img" src="/app/avatars/a8.svg" alt="庚"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/17">庚</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=7">#7</a><span class="post-time">2026-08-20 10:18</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=1">@甲 #1</a> 第六个回复。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-9" data-floor="8">
+      <div class="post-avatar"><a href="/user/18"><img class="avatar-img" src="/app/avatars/a9.svg" alt="辛"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/18">辛</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=8">#8</a><span class="post-time">2026-08-20 10:22</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?replyid=3">@乙</a> 这条是回复二楼的。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-10" data-floor="9">
+      <div class="post-avatar"><a href="/user/19"><img class="avatar-img" src="/app/avatars/a10.svg" alt="壬"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/19">壬</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=9">#9</a><span class="post-time">2026-08-20 10:26</span></div>
+        </div></div>
+        <div class="post-content"><p>@丙 #3 手打的引用，没有链接。</p></div>
+      </div>
+    </li>
+
+    <li class="post-item post-entry" id="post-11" data-floor="10">
+      <div class="post-avatar"><a href="/user/20"><img class="avatar-img" src="/app/avatars/a11.svg" alt="癸"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/20">癸</a>
+          <div class="post-meta"><a class="post-floor" href="/topic/9?floor=10">#10</a><span class="post-time">2026-08-20 10:30</span></div>
+        </div></div>
+        <div class="post-content"><p><a class="post-mention" href="/topic/9?floor=99">@某人 #99</a> 上一页的楼层。</p></div>
+      </div>
+    </li>
+
+  </ul>
+  <div class="reply-panel" id="reply">
+    <div class="reply-panel-head"><h3>发表回复</h3></div>
+    <form class="ajax-reply-form" method="post" action="/topic/9/reply">
+      <input type="hidden" name="_csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+      <textarea name="body"></textarea>
+      <button type="submit">回复</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>

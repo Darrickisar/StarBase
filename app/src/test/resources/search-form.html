@@ -1,0 +1,37 @@
+<!doctype html>
+<!--
+  GET /search as a signed-in visitor. The route is login-gated (see
+  search-guest.html), so this page is built from the markup linux.sb's own
+  stylesheet describes: .search-page-head > h2 + form.search-page-form, the
+  .search-page-query input+button pair, the .search-page-types radio group, the
+  .search-page-summary count line and .search-page-pagination, whose <button>
+  and <form> rules are why paging - and therefore searching - is a POST.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>搜索 - LINUX SB</title></head>
+<body class="search-page">
+<main class="wrap">
+  <div class="forum-layout">
+    <div class="forum-main">
+      <div class="main-panel">
+        <div class="search-page-head">
+          <h2>搜索</h2>
+          <form class="search-page-form" method="post" action="/search">
+            <input type="hidden" name="_csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+            <div class="search-page-query">
+              <input type="text" name="q" value="" placeholder="输入关键词" maxlength="60">
+              <button type="submit">搜索</button>
+            </div>
+            <div class="search-page-types">
+              <label class="search-page-radio"><input type="radio" name="type" value="topic" checked>主题</label>
+              <label class="search-page-radio"><input type="radio" name="type" value="reply">回帖</label>
+              <label class="search-page-radio"><input type="radio" name="type" value="user">用户</label>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+</body>
+</html>

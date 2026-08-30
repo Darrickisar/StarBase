@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The V5 ambient room bases. One of these is the window background, so a
+         cold start opens into the same room the Compose tree paints. The light
+         one is the default appearance, so it is the one named in themes.xml;
+         MainActivity swaps it before the first frame when the stored choice is
+         a dark room. -->
+    <color name="glass_base_light">#EDEFF4</color>
+    <color name="glass_base">#0B0C0F</color>
+    <color name="seed_crust">#D8B37A</color>
+</resources>

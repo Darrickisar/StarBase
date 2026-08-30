@@ -1,0 +1,757 @@
+package StarBase.Android.Forum.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
+import StarBase.Android.Forum.data.Conversation
+import StarBase.Android.Forum.data.NotifyItem
+import StarBase.Android.Forum.data.Profile
+import StarBase.Android.Forum.data.ProfileTab
+import StarBase.Android.Forum.data.ThemeMode
+import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.net.Api
+import StarBase.Android.Forum.net.Site
+import StarBase.Android.Forum.ui.EmptyPanel
+import StarBase.Android.Forum.ui.ErrorPanel
+import StarBase.Android.Forum.ui.Freshness
+import StarBase.Android.Forum.ui.Gap
+import StarBase.Android.Forum.ui.Hairline
+import StarBase.Android.Forum.ui.Load
+import StarBase.Android.Forum.ui.LoadingMark
+import StarBase.Android.Forum.ui.OnReturnToForeground
+import StarBase.Android.Forum.ui.Refreshable
+import StarBase.Android.Forum.ui.SmallAction
+import StarBase.Android.Forum.ui.ageLabel
+import StarBase.Android.Forum.ui.freshnessText
+import StarBase.Android.Forum.ui.components.Chip
+import StarBase.Android.Forum.ui.components.MetaText
+import StarBase.Android.Forum.ui.components.SbCard
+import StarBase.Android.Forum.ui.components.SectionHeader
+import StarBase.Android.Forum.ui.components.SegmentPill
+import StarBase.Android.Forum.ui.components.SimpleTopicRow
+import StarBase.Android.Forum.ui.components.TopicRow
+import StarBase.Android.Forum.ui.components.UserAvatar
+import StarBase.Android.Forum.ui.components.tierColor
+import StarBase.Android.Forum.ui.components.tierLabel
+import StarBase.Android.Forum.ui.failureOf
+import StarBase.Android.Forum.ui.glass.GlassTabs
+import StarBase.Android.Forum.ui.theme.LocalTokens
+import StarBase.Android.Forum.ui.theme.SbMetrics
+
+// ---- 通知 --------------------------------------------------------------------
+
+class NotifyViewModel : ViewModel() {
+    var state by mutableStateOf<Load<List<NotifyItem>>>(Load.Loading)
+        private set
+    var refreshing by mutableStateOf(false)
+        private set
+
+    private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS)
+    private var inFlight = false
+
+    val ageSeconds: Long get() = fresh.ageSeconds
+
+    fun load(force: Boolean = false) {
+        if (state is Load.Ready && !force) return
+        if (inFlight) return
+        inFlight = true
+        viewModelScope.launch {
+            // Only blank the screen on the first load; a refresh keeps the list
+            // visible so it does not flash empty.
+            if (state !is Load.Ready) state = Load.Loading else refreshing = true
+            try {
+                state = Load.Ready(Api.notifications())
+                fresh.mark()
+            } catch (e: Throwable) {
+                if (state !is Load.Ready) state = failureOf(e)
+            } finally {
+                refreshing = false
+                inFlight = false
+            }
+        }
+    }
+
+    /** Opening the screen always re-reads: the badge is why you came here. */
+    fun openOrRefresh() {
+        if (state !is Load.Ready || fresh.stale) load(force = true)
+    }
+}
+
+@Composable
+fun NotificationsScreen(
+    vm: NotifyViewModel,
+    signedIn: Boolean,
+    onBack: () -> Unit,
+    onLogin: () -> Unit,
+    onOpenHref: (String) -> Unit
+) {
+    // Covers both the first appearance and every return to the foreground.
+    OnReturnToForeground(signedIn) { if (signedIn) vm.openOrRefresh() }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DetailBar(
+            title = "通知",
+            subtitle = if (signedIn) freshnessText(vm.ageSeconds, vm.refreshing) else "",
+            onBack = onBack,
+            action = "刷新",
+            onAction = { vm.load(force = true) }
+        )
+        if (!signedIn) {
+            SignInPrompt("登录后查看通知", onLogin)
+            return@Column
+        }
+        when (val s = vm.state) {
+            is Load.Loading -> LoadingMark()
+            is Load.Failed -> ErrorPanel(s.message, s.kind, { vm.load(force = true) }, onLogin)
+            is Load.Ready -> Refreshable(
+                refreshing = vm.refreshing,
+                onRefresh = { vm.load(force = true) }
+            ) {
+                if (s.value.isEmpty()) {
+                    EmptyPanel("没有新通知")
+                } else {
+                    LazyColumn {
+                        itemsIndexed(s.value, key = { i, n -> "$i-${n.text.take(24)}" }) { index, item ->
+                            if (index > 0) Hairline(startInset = 16)
+                            NotifyRow(item) { if (item.href.isNotBlank()) onOpenHref(item.href) }
+                        }
+                        item("tail") { Gap(24) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotifyRow(item: NotifyItem, onClick: () -> Unit) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        if (item.unread) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .size(7.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(tokens.hotTint)
+            )
+            Spacer(Modifier.width(9.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = tokens.textPrimary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (item.timeText.isNotBlank()) {
+                Gap(4)
+                MetaText(item.timeText)
+            }
+        }
+    }
+}
+
+// ---- 私信 --------------------------------------------------------------------
+
+class MessagesViewModel : ViewModel() {
+    var state by mutableStateOf<Load<List<Conversation>>>(Load.Loading)
+        private set
+    var refreshing by mutableStateOf(false)
+        private set
+
+    private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS)
+    private var inFlight = false
+
+    val ageSeconds: Long get() = fresh.ageSeconds
+
+    fun load(force: Boolean = false) {
+        if (state is Load.Ready && !force) return
+        if (inFlight) return
+        inFlight = true
+        viewModelScope.launch {
+            if (state !is Load.Ready) state = Load.Loading else refreshing = true
+            try {
+                state = Load.Ready(Api.conversations())
+                fresh.mark()
+            } catch (e: Throwable) {
+                if (state !is Load.Ready) state = failureOf(e)
+            } finally {
+                refreshing = false
+                inFlight = false
+            }
+        }
+    }
+
+    /**
+     * Re-reads on open, and again after you come back from a thread - replies
+     * are written on the site's own page, so the list has to be re-read to see
+     * that a conversation moved.
+     */
+    fun openOrRefresh() {
+        if (state !is Load.Ready || fresh.stale) load(force = true)
+    }
+}
+
+@Composable
+fun MessagesScreen(
+    vm: MessagesViewModel,
+    signedIn: Boolean,
+    onBack: () -> Unit,
+    onLogin: () -> Unit,
+    onOpenSite: (String) -> Unit
+) {
+    // First appearance, and again on the way back from a thread opened in the
+    // site page - replies there move a conversation up the list.
+    OnReturnToForeground(signedIn) { if (signedIn) vm.openOrRefresh() }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DetailBar(
+            title = "私信",
+            subtitle = if (signedIn) freshnessText(vm.ageSeconds, vm.refreshing) else "",
+            onBack = onBack,
+            action = "刷新",
+            onAction = { vm.load(force = true) }
+        )
+        if (!signedIn) {
+            SignInPrompt("登录后查看私信", onLogin)
+            return@Column
+        }
+        when (val s = vm.state) {
+            is Load.Loading -> LoadingMark()
+            is Load.Failed -> ErrorPanel(s.message, s.kind, { vm.load(force = true) }, onLogin)
+            is Load.Ready -> Refreshable(
+                refreshing = vm.refreshing,
+                onRefresh = { vm.load(force = true) }
+            ) {
+                if (s.value.isEmpty()) {
+                    Column {
+                        EmptyPanel("还没有私信")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            SmallAction(text = "在网页中打开", primary = false) {
+                                onOpenSite(Site.MESSAGES)
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn {
+                        itemsIndexed(s.value, key = { i, c -> "${c.id}-$i" }) { index, item ->
+                            if (index > 0) Hairline(startInset = 66)
+                            ConversationRow(item) {
+                                // Threads render inside the site page so the reply
+                                // form stays the site's own.
+                                onOpenSite("${Site.MESSAGES}/${item.id}".removeSuffix("/"))
+                            }
+                        }
+                        item("tail") { Gap(24) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationRow(item: Conversation, onClick: () -> Unit) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        UserAvatar(name = item.peer, url = item.avatar, size = 40.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = item.peer,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                    color = tokens.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (item.timeText.isNotBlank()) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = item.timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tokens.textTertiary
+                    )
+                }
+            }
+            if (item.preview.isNotBlank()) {
+                Gap(4)
+                Text(
+                    text = item.preview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = tokens.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        if (item.unread > 0) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "${item.unread}",
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.base,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(tokens.hotTint)
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            )
+        }
+    }
+}
+
+// ---- 收藏 / 浏览历史 ---------------------------------------------------------
+
+@Composable
+fun BookmarksScreen(
+    store: UserStore,
+    onBack: () -> Unit,
+    onTopic: (Int) -> Unit
+) {
+    var tab by remember { mutableStateOf(0) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DetailBar(
+            title = if (tab == 0) "收藏" else "浏览历史",
+            subtitle = "保存在本机，不会上传",
+            onBack = onBack,
+            action = if (tab == 0) "清空收藏" else "清空历史",
+            onAction = { if (tab == 0) store.clearBookmarks() else store.clearHistory() }
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding, vertical = 11.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SegmentPill("收藏 ${store.bookmarks.size}", tab == 0) { tab = 0 }
+            SegmentPill("历史 ${store.history.size}", tab == 1) { tab = 1 }
+        }
+
+        val ids = if (tab == 0) store.bookmarks else store.history
+        if (ids.isEmpty()) {
+            EmptyPanel(
+                if (tab == 0) "还没有收藏" else "还没有浏览记录",
+                if (tab == 0) "在帖子页点右上角的收藏" else "看过的帖子会出现在这里"
+            )
+        } else {
+            LazyColumn {
+                itemsIndexed(ids.toList(), key = { i, id -> "$id-$i" }) { index, id ->
+                    if (index > 0) Hairline(startInset = 16)
+                    SimpleTopicRow(
+                        title = store.titleOf(id).ifBlank { "帖子 #$id" },
+                        subtitle = "#$id",
+                        onClick = { onTopic(id) }
+                    )
+                }
+                item("tail") { Gap(24) }
+            }
+        }
+    }
+}
+
+// ---- 个人设置 ----------------------------------------------------------------
+
+@Composable
+fun SettingsScreen(
+    store: UserStore,
+    signedIn: Boolean,
+    onBack: () -> Unit,
+    onLogin: () -> Unit,
+    onSignOut: () -> Unit,
+    onOpenSite: (String) -> Unit
+) {
+    val tokens = LocalTokens.current
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DetailBar(title = "个人设置", onBack = onBack)
+        LazyColumn {
+            item("theme") {
+                Gap(12)
+                SbCard(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+                    padding = 14.dp
+                ) {
+                    Text(
+                        text = "主题外观",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = tokens.textPrimary
+                    )
+                    Gap(10)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeMode.entries.forEach { mode ->
+                            SegmentPill(
+                                label = mode.label,
+                                selected = store.themeMode == mode,
+                                onClick = { store.updateTheme(mode) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            item("local") {
+                Gap(14)
+                SbCard(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+                    padding = 14.dp
+                ) {
+                    Text(
+                        text = "本机数据",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = tokens.textPrimary
+                    )
+                    Gap(6)
+                    Text(
+                        text = "收藏 ${store.bookmarks.size} 条 · 浏览历史 ${store.history.size} 条。" +
+                            "这两项只存在这台手机上。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = tokens.textSecondary
+                    )
+                    Gap(14)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        SmallAction("清空收藏", primary = false, onClick = store::clearBookmarks)
+                        SmallAction("清空历史", primary = false, onClick = store::clearHistory)
+                    }
+                }
+            }
+
+            item("account") {
+                Gap(14)
+                SbCard(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+                    padding = 14.dp
+                ) {
+                    Text(
+                        text = "账号",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = tokens.textPrimary
+                    )
+                    Gap(6)
+                    Text(
+                        text = if (signedIn) {
+                            "资料、密码、邮箱等设置由网站页面处理，App 不保存这些内容。"
+                        } else {
+                            "登录后可以在这里进入网站的账号设置。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = tokens.textSecondary
+                    )
+                    Gap(14)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (signedIn) {
+                            SmallAction("网站设置", primary = true) {
+                                onOpenSite("${Site.BASE}/settings")
+                            }
+                            SmallAction("退出登录", primary = false, onClick = onSignOut)
+                        } else {
+                            SmallAction("登录", primary = true, onClick = onLogin)
+                        }
+                    }
+                }
+                Gap(28)
+            }
+        }
+    }
+}
+
+// ---- 个人主页 / 我的主题 -----------------------------------------------------
+
+class ProfileViewModel : ViewModel() {
+    var state by mutableStateOf<Load<Profile>>(Load.Loading)
+        private set
+    var refreshing by mutableStateOf(false)
+        private set
+    /** Which of 主题 / 回帖 / 收藏 is on screen. */
+    var tab by mutableStateOf(ProfileTab.TOPICS)
+        private set
+
+    private var userId = 0
+    private val fresh = Freshness()
+    private var inFlight = false
+
+    val ageSeconds: Long get() = fresh.ageSeconds
+
+    /**
+     * Opens a profile. Coming back to one already on screen only re-reads once it
+     * has aged - this page doubles as 我的主题 and 我的积分, so a stale points
+     * count is worth the one request.
+     */
+    fun open(id: Int, want: ProfileTab = tab, force: Boolean = false) {
+        val same = id == userId && want == tab
+        val loaded = state is Load.Ready
+        if (same && loaded && !force && !fresh.stale) return
+        if (inFlight) return
+        inFlight = true
+        if (!same) fresh.invalidate()
+        userId = id
+        tab = want
+        viewModelScope.launch {
+            // Switching user or tab blanks the screen; re-reading does not.
+            if (!same || !loaded) state = Load.Loading else refreshing = true
+            try {
+                state = Load.Ready(Api.profile(id, want))
+                fresh.mark()
+            } catch (e: Throwable) {
+                if (state !is Load.Ready) state = failureOf(e)
+            } finally {
+                refreshing = false
+                inFlight = false
+            }
+        }
+    }
+
+    /** Switching tab always refetches - each one is its own page on the site. */
+    fun switchTab(want: ProfileTab) {
+        if (want == tab && state is Load.Ready) return
+        open(userId, want, force = true)
+    }
+
+    fun refresh() = open(userId, tab, force = true)
+
+    fun refreshIfStale() {
+        if (fresh.stale && state is Load.Ready) open(userId, tab, force = true)
+    }
+}
+
+@Composable
+fun ProfileScreen(
+    userId: Int,
+    vm: ProfileViewModel,
+    titleOverride: String = "",
+    startTab: ProfileTab = ProfileTab.TOPICS,
+    onBack: () -> Unit,
+    onTopic: (Int) -> Unit,
+    onLogin: () -> Unit,
+    onOpenSite: (String) -> Unit
+) {
+    LaunchedEffect(userId, startTab) { vm.open(userId, startTab) }
+    OnReturnToForeground(userId) { vm.refreshIfStale() }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        val loaded = (vm.state as? Load.Ready)?.value
+        DetailBar(
+            title = titleOverride.ifBlank { loaded?.name.orEmpty().ifBlank { "个人主页" } },
+            subtitle = if (vm.refreshing) {
+                "正在获取最新资料"
+            } else {
+                listOf(loaded?.group.orEmpty(), ageLabel(vm.ageSeconds))
+                    .filter { it.isNotBlank() }
+                    .joinToString(" · ")
+            },
+            onBack = onBack,
+            action = "刷新",
+            onAction = vm::refresh
+        )
+        when (val s = vm.state) {
+            is Load.Loading -> LoadingMark()
+            is Load.Failed -> ErrorPanel(s.message, s.kind, vm::refresh, onLogin)
+            is Load.Ready -> LazyColumn {
+                item("head") {
+                    Gap(12)
+                    ProfileCard(s.value) { onOpenSite(Site.user(userId)) }
+                }
+                // The site's own three tabs. 我的回帖 opens straight on 回帖, and
+                // from there the other two are one tap away.
+                item("tabs") {
+                    Gap(16)
+                    GlassTabs(
+                        labels = ProfileTab.entries.map { it.label },
+                        selected = ProfileTab.entries.indexOf(vm.tab),
+                        onSelect = { vm.switchTab(ProfileTab.entries[it]) },
+                        modifier = Modifier.padding(horizontal = SbMetrics.pagePadding)
+                    )
+                }
+                item("list-header") {
+                    Gap(14)
+                    SectionHeader(
+                        title = when (vm.tab) {
+                            ProfileTab.TOPICS -> "发布的主题"
+                            ProfileTab.REPLIES -> "参与的回帖"
+                            ProfileTab.FAVORITES -> "收藏的主题"
+                        },
+                        subtitle = if (s.value.topics.isEmpty()) {
+                            "这里还没有内容"
+                        } else {
+                            "${s.value.topics.size} 条"
+                        }
+                    )
+                    Gap(4)
+                }
+                if (s.value.topics.isEmpty()) {
+                    item("empty") {
+                        EmptyPanel(
+                            when (vm.tab) {
+                                ProfileTab.TOPICS -> "还没有发布过主题"
+                                ProfileTab.REPLIES -> "还没有回过帖"
+                                ProfileTab.FAVORITES -> "还没有收藏"
+                            },
+                            "下拉刷新或稍后再试"
+                        )
+                    }
+                } else {
+                    itemsIndexed(s.value.topics, key = { index, t -> "${t.id}-$index" }) { index, topic ->
+                        if (index > 0) Hairline(startInset = 66)
+                        TopicRow(
+                            topic = topic,
+                            onClick = { onTopic(topic.id) },
+                            showForum = true
+                        )
+                    }
+                }
+                item("tail") { Gap(24) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileCard(profile: Profile, onOpenSite: () -> Unit) {
+    val tokens = LocalTokens.current
+    SbCard(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+        padding = 18.dp
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            UserAvatar(name = profile.name, url = profile.avatar, size = 54.dp, ring = true)
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = profile.name.ifBlank { "用户 #${profile.id}" },
+                    style = MaterialTheme.typography.titleLarge,
+                    color = tokens.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Gap(4)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (profile.group.isNotBlank()) {
+                        Chip(
+                            text = profile.group,
+                            tint = tokens.accentGlow,
+                            container = tokens.accentWarm.copy(alpha = 0.10f)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    MetaText("UID ${profile.id}")
+                }
+            }
+        }
+
+        profile.title?.let { title ->
+            Gap(12)
+            val color = tierColor(title.tier)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(color.copy(alpha = 0.11f))
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = title.name, style = MaterialTheme.typography.labelLarge, color = color)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = tierLabel(title.tier),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color.copy(alpha = 0.85f)
+                )
+            }
+        }
+
+        if (profile.stats.isNotEmpty()) {
+            Gap(14)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                profile.stats.take(4).forEach { (label, value) ->
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = value.ifBlank { "—" },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = tokens.textPrimary
+                        )
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tokens.textSecondary
+                        )
+                    }
+                }
+            }
+        }
+
+        if (profile.joinedText.isNotBlank()) {
+            Gap(10)
+            MetaText(profile.joinedText)
+        }
+
+        Gap(14)
+        SmallAction("在网页中查看", primary = false, onClick = onOpenSite)
+    }
+}
+
+// ---- shared ------------------------------------------------------------------
+
+@Composable
+fun SignInPrompt(text: String, onLogin: () -> Unit) {
+    val tokens = LocalTokens.current
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 30.dp, vertical = 52.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = tokens.textSecondary
+        )
+        Gap(16)
+        SmallAction("登录", primary = true, onClick = onLogin)
+    }
+}
