@@ -7,6 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import StarBase.Android.Forum.data.LiveBlock
+import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.SiteException
 
@@ -169,6 +170,27 @@ class ParseTest {
         assertEquals("a comment's own .donate-reaction-count", 12, second.likes)
     }
 
+    /**
+     * The like button carries three things the app cannot get from the count: that
+     * we already liked it, that it was paid for - the site does not let a coined
+     * reaction be taken back - and the point amounts on offer.
+     */
+    @Test
+    fun aCommentCarriesItsOwnReactionState() {
+        val byFloor = Parse.topic(9, 1, fixture("topic-replies.html"))
+            .comments.associateBy { it.floor }
+
+        val liked = byFloor.getValue(2)
+        assertTrue("data-liked=1", liked.liked)
+        assertFalse("data-coined=0, so this one can still be taken back", liked.coined)
+        assertEquals(listOf(1, 5, 10, 50), liked.tiers)
+
+        // A comment with no reaction button offers nothing rather than defaulting.
+        val plain = byFloor.getValue(1)
+        assertFalse(plain.liked)
+        assertTrue(plain.tiers.isEmpty())
+    }
+
     @Test
     fun quoteReferencesResolveTheWayTheSiteThreadsThem() {
         val byFloor = Parse.topic(9, 1, fixture("topic-replies.html"))
@@ -249,6 +271,360 @@ class ParseTest {
         assertEquals(11, hits.first().authorId)
         assertEquals(18, hits.first().replies)
         assertEquals(1188, hits[1].id)
+    }
+
+    // ---- 引用楼层 -------------------------------------------------------------
+
+    /*
+     * Quoting is not a form field on this site: the reply handler recovers the
+     * parent floor from the body text. So the writer and the reader have to agree
+     * on one pattern, and these check them against each other rather than against
+     * a string literal - a change to the pattern that breaks only one direction
+     * fails here.
+     */
+
+    /**
+     * One comment carrying [body], in the markup the site renders comments with.
+     *
+     * The opening post has to be there: the parser treats the first row on page 1
+     * as 主楼 and drops it from the comment list, so a fixture of one row parses
+     * as a topic with no comments at all.
+     */
+    private fun commentHtml(floor: Int, body: String): String =
+        """
+        <html><body><ul class="post-list topic-post-list">
+          <li class="post-item post-entry" id="post-1">
+            <div class="post-body">
+              <div class="post-head"><div class="post-info">
+                <a class="post-title post-author" href="/user/1">站长</a>
+              </div></div>
+              <div class="post-content"><p>主楼</p></div>
+            </div>
+          </li>
+          <li class="post-item post-entry" id="post-${floor + 1}" data-floor="$floor">
+            <div class="post-body">
+              <div class="post-head"><div class="post-info">
+                <a class="post-title post-author" href="/user/7">乙</a>
+              </div></div>
+              <div class="post-content"><p>$body</p></div>
+            </div>
+          </li>
+        </ul></body></html>
+        """.trimIndent()
+
+    @Test
+    fun aQuotedReplyIsReadBackAsAnswaringThatFloor() {
+        val parent = Post(id = "p3", author = "丙", floor = 3)
+        val prefix = Parse.quotePrefix(parent)
+
+        val parsed = Parse.topic(9, 1, commentHtml(9, prefix + "确实，我也这么想。"))
+        assertEquals(1, parsed.comments.size)
+        assertEquals(
+            "the floor the writer aimed at is the floor the reader recovers",
+            3,
+            parsed.comments.first().parentFloor
+        )
+    }
+
+    @Test
+    fun aPlainReplyQuotesNothing() {
+        assertEquals("", Parse.quotePrefix(null))
+        // The opening post has floor 0 - answering the topic is not a quote.
+        assertEquals("", Parse.quotePrefix(Post(id = "p1", author = "站长", floor = 0)))
+
+        val parsed = Parse.topic(9, 1, commentHtml(9, "没有引用任何人。"))
+        assertEquals(0, parsed.comments.first().parentFloor)
+    }
+
+    @Test
+    fun aNameWithSpacesStillResolvesToTheRightFloor() {
+        // Whitespace inside a name would end the mention early and a '#' would
+        // move where the floor looks like it starts, so both come out.
+        val parent = Post(id = "p5", author = "老 王 #1", floor = 5)
+        val prefix = Parse.quotePrefix(parent)
+
+        assertFalse("no whitespace survives inside the mention", prefix.substringBefore(" #").contains(' '))
+        val parsed = Parse.topic(9, 1, commentHtml(9, prefix + "同意。"))
+        assertEquals(5, parsed.comments.first().parentFloor)
+    }
+
+    // ---- 通用表单读取 ---------------------------------------------------------
+
+    /*
+     * Every write on this site is "read the form, post it back". 回帖 broke
+     * because it did the opposite - named `content` where the markup says `body`,
+     * posted to /topic/{id} instead of the form's own action - so the request
+     * never reached the reply handler and the app reported 「已提交，但未能确认
+     * 结果」 for a reply that was never created. These pin the reader down.
+     */
+
+    @Test
+    fun formOfReadsAFormTheWayABrowserWouldSubmitIt() {
+        val form = Parse.formOf(fixture("search-form.html"), "form.search-page-form")
+        assertNotNull("expected to find the form", form)
+
+        assertEquals("https://linux.sb/search", form!!.action)
+        assertTrue(form.post)
+        // Hidden state has to ride along untouched.
+        assertEquals(64, form.fields.getValue("_csrf").length)
+        // A text input contributes its value, even when that value is empty.
+        assertEquals("", form.fields.getValue("q"))
+    }
+
+    @Test
+    fun formOfKeepsOnlyTheCheckedRadio() {
+        val form = Parse.formOf(fixture("search-form.html"), "form.search-page-form")!!
+
+        // Three radios share one name; a real submit sends the checked one only.
+        assertEquals("topic", form.fields.getValue("type"))
+        assertEquals(
+            "a name appears once no matter how many inputs share it",
+            1,
+            form.fields.keys.count { it == "type" }
+        )
+    }
+
+    @Test
+    fun formOfIgnoresASubmitButtonWithoutAName() {
+        val form = Parse.formOf(fixture("search-form.html"), "form.search-page-form")!!
+
+        // <button type="submit"> with no name submits nothing.
+        assertEquals(setOf("_csrf", "q", "type"), form.fields.keys)
+    }
+
+    @Test
+    fun formOfReportsNoTurnstileWhenThereIsNone() {
+        val form = Parse.formOf(fixture("search-form.html"), "form.search-page-form")!!
+        assertFalse(form.turnstile)
+    }
+
+    @Test
+    fun formOfIsNullWhenThePageCarriesNoSuchForm() {
+        // A gated page renders the 「消息」 panel instead of the form.
+        assertNull(Parse.formOf(fixture("search-guest.html"), "form.search-page-form"))
+        assertNull(Parse.replyForm(org.jsoup.Jsoup.parse(fixture("search-guest.html"))))
+    }
+
+    @Test
+    fun formWithOverlaysTypedValuesAndKeepsTheRest() {
+        val form = Parse.formOf(fixture("search-form.html"), "form.search-page-form")!!
+        val body = form.with("q" to "内核编译")
+
+        assertEquals("内核编译", body.getValue("q"))
+        // Everything the site put there survives the overlay.
+        assertEquals(form.fields.getValue("_csrf"), body.getValue("_csrf"))
+        assertEquals("topic", body.getValue("type"))
+    }
+
+    // ---- 写操作的表单（真实登录态 markup）-------------------------------------
+
+    private fun doc(name: String) = org.jsoup.Jsoup.parse(fixture(name), "https://linux.sb")
+
+    /**
+     * The reply bug, pinned to the markup that caused it.
+     *
+     * The app used to post `content` to `/topic/{id}`. The real form says `body`
+     * at `/reply_edit`, so that request never reached the reply handler - the site
+     * just re-rendered the topic page, and the app read a 200 full of HTML as
+     * "probably sent". Nothing was ever created.
+     */
+    @Test
+    fun theReplyFormPostsBodyToReplyEdit() {
+        val form = assertNotNull("expected the reply form", Parse.replyForm(doc("reply-form.html")))
+            .let { Parse.replyForm(doc("reply-form.html"))!! }
+
+        assertEquals("https://linux.sb/reply_edit", form.action)
+        assertTrue(form.post)
+        assertEquals("the textarea is named body, not content", "body", form.bodyField)
+        assertEquals(setOf("_csrf", "topic_id", "body"), form.fields.keys)
+        assertEquals("17536", form.fields.getValue("topic_id"))
+    }
+
+    @Test
+    fun theReplyFormNeedsNoBrowser() {
+        // No Turnstile today. If the site adds one, this fails and the reply has
+        // to go to a WebView instead of being posted natively.
+        assertFalse(Parse.replyForm(doc("reply-form.html"))!!.turnstile)
+    }
+
+    @Test
+    fun theReplyFormsFileInputIsNotSubmitted() {
+        // 附件 is its own upload endpoint; a file input cannot be reproduced, and
+        // sending it empty would be a field the site did not ask for.
+        val form = Parse.replyForm(doc("reply-form.html"))!!
+        assertFalse(form.fields.keys.any { it.contains("attachment") })
+    }
+
+    /**
+     * The trap in the 发帖 form: `topic_special_type` offers `lottery` and
+     * `virtual_card`, neither checked, because 普通帖 (value="") is added by the
+     * site's own script. Inventing a value here posts 抽奖帖 every time.
+     */
+    @Test
+    fun theNewTopicFormLeavesTheSpecialTypeUnset() {
+        val form = assertNotNull(
+            "expected the new-topic form",
+            Parse.newTopicForm(doc("new-topic-form.html"))
+        ).let { Parse.newTopicForm(doc("new-topic-form.html"))!! }
+
+        assertFalse(
+            "an unchecked radio group contributes nothing, as in a browser",
+            form.fields.containsKey("topic_special_type")
+        )
+    }
+
+    @Test
+    fun theNewTopicFormCarriesTheFieldsANewTopicNeeds() {
+        val form = Parse.newTopicForm(doc("new-topic-form.html"))!!
+
+        assertEquals("body", form.bodyField)
+        assertTrue(form.fields.containsKey("title"))
+        assertEquals("id=0 is what marks a new topic rather than an edit", "0", form.fields.getValue("id"))
+        assertEquals("the board the site preselected", "1", form.fields.getValue("forum_id"))
+        assertEquals(64, form.fields.getValue("_csrf").length)
+    }
+
+    /**
+     * The 发帖 form has no `action`, so it posts back to the page it came from.
+     * Parsing it against the site root instead of its own URL would aim the post
+     * at `/` - which is why [Parse.formOf] falls back to the document's location
+     * and the caller has to parse with the real address.
+     */
+    @Test
+    fun aFormWithoutAnActionPostsBackToItsOwnPage() {
+        val served = org.jsoup.Jsoup.parse(fixture("new-topic-form.html"), "https://linux.sb/topic_edit")
+        assertEquals("https://linux.sb/topic_edit", Parse.newTopicForm(served)!!.action)
+    }
+
+    @Test
+    fun theNewTopicFormIsMultipart() {
+        // The form declares multipart/form-data; posting it url-encoded is a
+        // different request from the one the handler expects.
+        assertTrue(Parse.newTopicForm(doc("new-topic-form.html"))!!.multipart)
+        assertFalse("a reply is an ordinary form post", Parse.replyForm(doc("reply-form.html"))!!.multipart)
+    }
+
+    @Test
+    fun theNewTopicFormListsTheBoardsToPostTo() {
+        val boards = Parse.boardOptions(doc("new-topic-form.html"))
+
+        assertEquals(9, boards.size)
+        assertEquals(1 to "错误地方", boards.first())
+        assertTrue("board ids are all real", boards.all { it.first > 0 })
+        assertTrue("board names are all present", boards.none { it.second.isBlank() })
+    }
+
+    @Test
+    fun theDonateFormPostsOneReplyIdAndThePointsAreAddedByTheCaller() {
+        val form = assertNotNull(
+            "expected the donate form",
+            Parse.donateForm(doc("donate-reaction-form.html"), 117444)
+        ).let { Parse.donateForm(doc("donate-reaction-form.html"), 117444)!! }
+
+        assertEquals("https://linux.sb/donate_reply_reaction", form.action)
+        assertEquals(setOf("_csrf", "donate_reaction_reply_id"), form.fields.keys)
+        assertEquals("117444", form.fields.getValue("donate_reaction_reply_id"))
+        // The site's own script adds this at submit time; it is not in the markup.
+        assertFalse(form.fields.containsKey("donate_reaction_points"))
+    }
+
+    @Test
+    fun aReactionReportsWhatTheSiteSaysAboutIt() {
+        val r = assertNotNull(
+            "expected reaction state",
+            Parse.reactionOf(doc("donate-reaction-form.html"), 117444)
+        ).let { Parse.reactionOf(doc("donate-reaction-form.html"), 117444)!! }
+
+        assertFalse(r.liked)
+        assertFalse("a coined reaction cannot be taken back", r.coined)
+        assertEquals(listOf(1, 5, 10, 50), r.tiers)
+        assertEquals("candgo", r.authorName)
+    }
+
+    /**
+     * 主楼 and 评论 are two unrelated mechanisms. Liking the topic the way a comment
+     * is liked is what made 点赞打赏 fail on the opening post: there is no form on
+     * the page at all, only a link to /donate?topic_id=…, and its modal carries the
+     * real one.
+     */
+    @Test
+    fun theTopicDonateFormComesFromTheModalNotThePage() {
+        val html = fixture("donate-topic-modal.html")
+        val form = assertNotNull("expected the donate form", Parse.donateTopicForm(html))
+            .let { Parse.donateTopicForm(html)!! }
+
+        assertEquals("https://linux.sb/donate", form.action)
+        assertTrue(form.post)
+        // Not donate_reaction_reply_id: this one is keyed by topic.
+        assertTrue(form.fields.containsKey("topic_id"))
+        assertFalse(form.fields.containsKey("donate_reaction_reply_id"))
+        // One-shot, and only the modal that was just served has it.
+        assertEquals(32, form.fields.getValue("request_key").length)
+        assertEquals("a plain 点赞 sends no amount", "", form.fields.getValue("amount"))
+    }
+
+    @Test
+    fun theTopicDonatePanelOffersItsOwnPresets() {
+        val panel = Parse.donatePanel(fixture("donate-topic-modal.html"))
+
+        // The topic's presets are not the comment tiers (1,5,10,50).
+        assertEquals(listOf(6, 10, 33, 66, 88), panel.presets)
+        assertEquals(99, panel.maxAmount)
+        assertTrue("expected the site's own summary line", panel.info.contains("积分"))
+    }
+
+    @Test
+    fun theDmFormPostsContentNotBody() {
+        val form = assertNotNull(
+            "expected the compose form",
+            Parse.dmComposeForm(doc("dm-compose-form.html"))
+        ).let { Parse.dmComposeForm(doc("dm-compose-form.html"))!! }
+
+        assertEquals("https://linux.sb/direct_messages/12053", form.action)
+        // The site names this one `content` where a reply's is `body`. Reading the
+        // markup is the only way to get both right.
+        assertEquals("content", form.bodyField)
+        assertEquals(setOf("_csrf", "partner_id", "content"), form.fields.keys)
+        assertEquals("12053", form.fields.getValue("partner_id"))
+    }
+
+    // ---- 私信 -----------------------------------------------------------------
+
+    /**
+     * The list parser used to look for `.dm-item`, `.dm-preview`, `.dm-time` and
+     * four more classes that appear nowhere on the real page - the site calls these
+     * `.direct-messages-conversation`. Every signed-in user with private messages
+     * saw an empty 私信 screen.
+     */
+    @Test
+    fun theConversationListParsesTheSitesOwnRows() {
+        val list = Parse.conversations(fixture("dm-list.html"))
+
+        assertEquals(3, list.size)
+        val first = list.first()
+        assertEquals("8823", first.id)
+        assertEquals("甲", first.peer)
+        // The row links to the thread, not a profile: the id is on the avatar.
+        assertEquals(8823, first.peerId)
+        assertTrue("expected a preview line", first.preview.isNotBlank())
+        assertEquals("2026-08-14", first.timeText)
+        assertTrue("expected an avatar", first.avatar.startsWith("https://linux.sb/"))
+    }
+
+    @Test
+    fun aThreadSeparatesTheirMessagesFromOurs() {
+        val t = Parse.thread(12053, fixture("dm-thread.html"))
+
+        assertEquals(12053, t.partnerId)
+        assertEquals("乙", t.partner)
+        assertEquals(2, t.messages.size)
+        // The site marks only the other person's messages; ours carry no class, so
+        // "not is-theirs" is the test rather than looking for an is-mine marker.
+        assertTrue("every message here is theirs", t.messages.none { it.fromMe })
+        assertEquals("乙", t.messages.first().sender)
+        assertTrue(t.messages.first().body.isNotBlank())
+        assertEquals("2026-08-13T15:00:11+08:00", t.messages.first().timeText)
+        assertEquals("the id the site polls updates from", 61190L, t.lastId)
     }
 
     // ---- login ---------------------------------------------------------------

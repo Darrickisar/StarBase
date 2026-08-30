@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  The compose box on /direct_messages/<partnerId>, verbatim bar _csrf.
+
+  Note the body field is `content` here, where a reply's is `body`. The site is
+  not consistent across its own forms, which is the whole reason the app reads
+  field names off the markup instead of naming them.
+
+  The form posts to the conversation's own URL, and `partner_id` repeats the id
+  from the path.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>私信发送表单 - LINUX SB</title></head>
+<body>
+<form class="direct-messages-compose" method="post" action="/direct_messages/12053"><input type="hidden" name="_csrf" value="0000000000000000000000000000000000000000000000000000000000000000"><input type="hidden" name="partner_id" value="12053"><textarea name="content" maxlength="500" placeholder="输入私信，Enter 发送，Shift+Enter 换行" required></textarea><div><span class="direct-messages-compose-help">纯文本消息 · 最多 500 字</span><span class="direct-messages-compose-status" aria-live="polite"></span><button type="submit" data-loading-text="发送中">发送</button></div></form>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  The 点赞 form that sits on every comment, verbatim from a signed-in topic
+  page. Two things the markup alone does not say, both from the site's own
+  plugins.js:
+
+    - `donate_reaction_points` is NOT in the HTML. The script adds it at submit
+      time: 0 for a plain like, otherwise one of `data-tiers`.
+    - the button is type="button", so it submits nothing by itself - the script
+      posts the form.
+
+  `data-liked` / `data-coined` carry the current state: a coined reaction cannot
+  be taken back, which is why the app has to read them rather than toggle.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>点赞表单 - LINUX SB</title></head>
+<body>
+<form class="post-action-form donate-reaction-form" method="post" action="/donate_reply_reaction"><input type="hidden" name="_csrf" value="0000000000000000000000000000000000000000000000000000000000000000"><input type="hidden" name="donate_reaction_reply_id" value="117444"><button type="button" class="donate-reaction-action" data-donate-reaction data-reply-id="117444" data-author-name="candgo" data-liked="0" data-coined="0" data-tiers="1,5,10,50" aria-label="点赞" title="点赞"><svg class="donate-reaction-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.8 8.8c0 5.1-8.8 10.2-8.8 10.2S3.2 13.9 3.2 8.8A4.8 4.8 0 0 1 12 6.2a4.8 4.8 0 0 1 8.8 2.6Z"/></svg><span class="donate-reaction-count" hidden>0</span><span class="donate-reaction-label">点赞</span></button></form>
+</body>
+</html>

@@ -70,6 +70,15 @@ data class Post(
     val floor: Int = 0,
     /** The `id="post-<n>"` the site anchors quote links to; 0 when absent. */
     val replyId: Int = 0,
+    /** True when we have already liked this one. */
+    val liked: Boolean = false,
+    /**
+     * True when this like was paid for. The site does not let a coined reaction be
+     * taken back, so the app must not offer to.
+     */
+    val coined: Boolean = false,
+    /** Point amounts the site offers on this comment; empty when it offers none. */
+    val tiers: List<Int> = emptyList(),
     /** Floor this comment answers, resolved the way the site threads quotes. */
     val parentFloor: Int = 0,
     /** Comments on this page that answer this one. */

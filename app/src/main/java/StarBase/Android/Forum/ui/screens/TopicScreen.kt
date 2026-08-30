@@ -33,6 +33,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -53,6 +55,8 @@ import StarBase.Android.Forum.ui.OnReturnToForeground
 import StarBase.Android.Forum.ui.Refreshable
 import StarBase.Android.Forum.ui.components.MetaDot
 import StarBase.Android.Forum.ui.components.MetaRow
+import StarBase.Android.Forum.ui.components.ActionGlyph
+import StarBase.Android.Forum.ui.components.ActionIcon
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.PostBody
 import StarBase.Android.Forum.ui.components.UserAvatar
@@ -87,6 +91,31 @@ class TopicViewModel : ViewModel() {
     var posting by mutableStateOf(false)
         private set
     var notice by mutableStateOf("")
+        private set
+
+    /** The comment the reply box is quoting, or null for a plain reply. */
+    var quoting by mutableStateOf<Post?>(null)
+        private set
+
+    /**
+     * Set when a reply can only be made in a browser - a Turnstile widget on the
+     * form, or markup we no longer recognise. The screen opens the site page.
+     */
+    var browserReply by mutableStateOf("")
+        private set
+
+    /** The post whose 点赞 amount is being chosen, or null when none is. */
+    var likeTarget by mutableStateOf<Post?>(null)
+        private set
+    var liking by mutableStateOf(false)
+        private set
+
+    /** 主楼's 打赏 presets, fetched when the picker is armed for the opening post. */
+    var topicPresets by mutableStateOf<List<Int>>(emptyList())
+        private set
+
+    /** The modal's own 已打赏 … 我的积分 … line. Worth showing before spending. */
+    var topicDonateInfo by mutableStateOf("")
         private set
 
     val comments = mutableStateListOf<Post>()
@@ -176,18 +205,103 @@ class TopicViewModel : ViewModel() {
     fun reply(body: String, onSuccess: () -> Unit) {
         if (posting || body.isBlank()) return
         posting = true
+        val target = quoting
         viewModelScope.launch {
             try {
-                val result = Api.reply(topicId, body.trim())
-                notice = result.message.ifBlank { if (result.ok) "已发表" else "已提交" }
+                val result = Api.reply(topicId, body.trim(), target)
+                notice = result.message.ifBlank { "已发表" }
+                quoting = null
                 onSuccess()
                 loadPage(lastPage)
+            } catch (e: Api.NeedsBrowser) {
+                // Not a failure: the site wants a browser for this one, so hand
+                // the draft off instead of losing it.
+                browserReply = e.url
+                notice = e.message.orEmpty()
             } catch (e: Throwable) {
                 notice = e.message ?: "回复失败"
             } finally {
                 posting = false
             }
         }
+    }
+
+    /** Aims the reply box at a floor, or clears the aim when [post] is null. */
+    fun quote(post: Post?) {
+        quoting = post
+    }
+
+    /**
+     * Arms the 点赞 picker for one comment. Liking is free but 投币 spends points,
+     * so the amount is always an explicit choice - the site asks too.
+     */
+    fun askLike(post: Post) {
+        likeTarget = post
+        // 主楼's amounts live in the site's donate modal, not on the page, so they
+        // have to be fetched before the picker can offer them. 评论 carry theirs in
+        // data-tiers and need no round trip.
+        topicPresets = emptyList()
+        topicDonateInfo = ""
+        if (post.isOpening) {
+            viewModelScope.launch {
+                val panel = runCatching { Api.donateOptions(topicId) }.getOrNull()
+                // Only apply it if the picker is still aimed where it was aimed.
+                if (likeTarget?.isOpening == true) {
+                    topicPresets = panel?.presets.orEmpty()
+                    topicDonateInfo = panel?.info.orEmpty()
+                }
+            }
+        }
+    }
+
+    fun cancelLike() {
+        likeTarget = null
+        topicPresets = emptyList()
+        topicDonateInfo = ""
+    }
+
+    /**
+     * Sends the like. [points] is 0 for a plain 点赞, otherwise one of the amounts
+     * the post offers.
+     *
+     * 主楼 and 评论 are two unrelated endpoints on this site - the opening post has
+     * no form on the page at all, only a donate modal - so which one this is decides
+     * the request.
+     *
+     * Re-reads the page afterwards rather than adjusting the count locally: the
+     * site is the only thing that knows what the new count and state are, and
+     * guessing would leave a wrong number on screen until the next refresh.
+     */
+    fun like(points: Int) {
+        val target = likeTarget ?: return
+        if (liking) return
+        likeTarget = null
+        topicPresets = emptyList()
+        topicDonateInfo = ""
+        liking = true
+        viewModelScope.launch {
+            try {
+                val result = if (target.isOpening) {
+                    Api.likeTopic(topicId, points)
+                } else {
+                    // The comment's form is on the page it is displayed on.
+                    Api.like(topicId, target.replyId, points, page)
+                }
+                notice = result.message.ifBlank {
+                    if (points > 0) "已打赏 $points 积分" else "已点赞"
+                }
+                fresh.invalidate()
+                load(initial = false)
+            } catch (e: Throwable) {
+                notice = e.message ?: "点赞失败"
+            } finally {
+                liking = false
+            }
+        }
+    }
+
+    fun browserReplyHandled() {
+        browserReply = ""
     }
 
     /**
@@ -238,6 +352,16 @@ fun TopicScreen(
     LaunchedEffect(topicId) { vm.open(topicId) }
     OnReturnToForeground(topicId) { vm.refreshIfStale() }
 
+    // A reply the site will only take from a browser: hand it the page. The
+    // notice already says why, so this opens without a second prompt.
+    LaunchedEffect(vm.browserReply) {
+        val url = vm.browserReply
+        if (url.isNotBlank()) {
+            onOpenLink(url)
+            vm.browserReplyHandled()
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         val detail = (vm.state as? Load.Ready)?.value
         // §5.1: the bar carries the board, not the post title - the title itself
@@ -280,9 +404,26 @@ fun TopicScreen(
                 }
                 // A guest gets the §6.1 bar inside the flow instead of a composer
                 // they cannot use.
-                if (s.value.canReply || signedIn) {
+                // Choosing a 点赞 amount replaces the composer while it is up: the
+                // two are alternatives, and stacking both would push the thread
+                // off screen.
+                val likeTarget = vm.likeTarget
+                if (likeTarget != null) {
+                    LikePicker(
+                        post = likeTarget,
+                        // 主楼's amounts come from the donate modal and arrive a
+                        // moment later; a comment's are already on the page.
+                        amounts = if (likeTarget.isOpening) vm.topicPresets else likeTarget.tiers,
+                        // Only 主楼's modal reports the point balance.
+                        info = if (likeTarget.isOpening) vm.topicDonateInfo else "",
+                        onPick = vm::like,
+                        onCancel = vm::cancelLike
+                    )
+                } else if (s.value.canReply || signedIn) {
                     ReplyBar(
                         posting = vm.posting,
+                        quoting = vm.quoting,
+                        onCancelQuote = { vm.quote(null) },
                         onSend = { text, done -> vm.reply(text) { done() } }
                     )
                 }
@@ -352,9 +493,32 @@ private fun TopicBody(
                             onImageClick = onOpenLink
                         )
                     }
-                    if (opening.likes > 0) {
-                        Gap(14)
-                        GlassChip(text = "赞 ${opening.likes}", tint = tokens.hotTint)
+                    // 主楼's 点赞打赏 goes through the site's donate modal, not the
+                    // per-comment form, so it gets a real action here rather than
+                    // the read-only count chip this used to be.
+                    // The heart stays hollow here whatever we have done: unlike a
+                    // comment, the site publishes no per-reader state for 主楼 - the
+                    // page and the donate modal both carry only totals - so a filled
+                    // heart would be an invention.
+                    Gap(14)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (canReply) {
+                            IconAction(
+                                glyph = ActionGlyph.HEART,
+                                onClick = { vm.askLike(opening) },
+                                description = "点赞打赏"
+                            )
+                        } else {
+                            ActionIcon(
+                                glyph = ActionGlyph.HEART,
+                                tint = tokens.textTertiary,
+                                filled = false
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        if (opening.likes > 0) {
+                            MetaText("${opening.likes} 人点赞打赏")
+                        }
                     }
                 }
                 Gap(20)
@@ -392,7 +556,13 @@ private fun TopicBody(
                 itemsIndexed(vm.comments, key = { i, p -> "${p.id}-$i" }) { index, post ->
                     // §6.5 分隔只用一条 1px 低透明度线, 不做独立卡片.
                     if (index > 0) Hairline(startInset = pad.value.toInt() + 45)
-                    CommentView(post = post, onUser = onUser, onOpenLink = onOpenLink)
+                    CommentView(
+                        post = post,
+                        onUser = onUser,
+                        onOpenLink = onOpenLink,
+                        onQuote = if (canReply) ({ vm.quote(post) }) else null,
+                        onLike = if (canReply) ({ vm.askLike(post) }) else null
+                    )
                 }
                 item("footer") {
                     ListFooter(vm.loadingMore, vm.hasMore, vm::loadMore)
@@ -483,7 +653,13 @@ private fun AuthorLine(post: Post, onUser: (Int) -> Unit) {
  * 颜色减弱. The row has no background of its own - the divider does the work.
  */
 @Composable
-private fun CommentView(post: Post, onUser: (Int) -> Unit, onOpenLink: (String) -> Unit) {
+private fun CommentView(
+    post: Post,
+    onUser: (Int) -> Unit,
+    onOpenLink: (String) -> Unit,
+    onQuote: (() -> Unit)? = null,
+    onLike: (() -> Unit)? = null
+) {
     val tokens = LocalTokens.current
     val hot = post.isHot
     Row(
@@ -537,6 +713,32 @@ private fun CommentView(post: Post, onUser: (Int) -> Unit, onOpenLink: (String) 
                     MetaDot()
                     MetaText("${post.likes} 赞")
                 }
+                // 引用 and 点赞 sit in the meta line rather than being buttons of
+                // their own - §06 keeps this row free of anything button-shaped.
+                if (onQuote != null && post.floor > 0) {
+                    MetaDot()
+                    IconAction(
+                        glyph = ActionGlyph.QUOTE,
+                        onClick = onQuote,
+                        description = "引用 #${post.floor}"
+                    )
+                }
+                if (onLike != null && post.replyId > 0) {
+                    MetaDot()
+                    IconAction(
+                        // A coined reaction cannot be taken back, so it shows as a
+                        // coin rather than a heart that looks like it would toggle.
+                        glyph = if (post.coined) ActionGlyph.COIN else ActionGlyph.HEART,
+                        onClick = onLike,
+                        description = when {
+                            post.coined -> "已投币"
+                            post.liked -> "已点赞"
+                            else -> "点赞"
+                        },
+                        filled = post.liked || post.coined,
+                        enabled = !post.coined
+                    )
+                }
             }
             if (post.blocks.isNotEmpty()) {
                 Gap(9)
@@ -562,6 +764,48 @@ private fun CommentView(post: Post, onUser: (Int) -> Unit, onOpenLink: (String) 
                 )
             }
         }
+    }
+}
+
+/**
+ * A tappable glyph in a comment's meta line.
+ *
+ * The tap target is padded out to 32dp while the glyph stays at 15dp, so the row
+ * keeps its metadata weight without the icons being hard to hit. [description] is
+ * for screen readers only - the shapes carry the meaning visually.
+ */
+@Composable
+private fun IconAction(
+    glyph: ActionGlyph,
+    onClick: () -> Unit,
+    description: String,
+    filled: Boolean = false,
+    enabled: Boolean = true
+) {
+    val tokens = LocalTokens.current
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .then(
+                if (enabled) {
+                    Modifier.clickable(onClickLabel = description, onClick = onClick)
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        ActionIcon(
+            glyph = glyph,
+            tint = when {
+                !enabled -> tokens.accentWarm.copy(alpha = 0.55f)
+                filled -> tokens.accentWarm
+                else -> tokens.textSecondary
+            },
+            filled = filled,
+            modifier = Modifier.semantics { contentDescription = description }
+        )
     }
 }
 
@@ -675,9 +919,92 @@ private fun GuestCommentBar(onLogin: () -> Unit, onRegister: () -> Unit) {
     }
 }
 
+/**
+ * 点赞 / 投币 amount picker.
+ *
+ * A plain 点赞 is free and 投币 spends points, so the two are never one tap: this
+ * mirrors what the site's own dialog offers - 直接点赞 plus the tiers the comment
+ * carries - and puts the free choice first.
+ */
+@Composable
+private fun LikePicker(
+    post: Post,
+    amounts: List<Int>,
+    info: String,
+    onPick: (Int) -> Unit,
+    onCancel: () -> Unit
+) {
+    val tokens = LocalTokens.current
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Hairline()
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (post.floor > 0) "给 #${post.floor} ${post.author}" else "给 ${post.author}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tokens.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "取消",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tokens.accentWarm,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = onCancel)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+            if (info.isNotBlank()) {
+                Gap(5)
+                Text(
+                    text = info,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textTertiary,
+                    maxLines = 2
+                )
+            }
+            Gap(9)
+            GlassButton(
+                // 主楼 has no un-like: the site offers only 直接点赞, and publishes no
+                // state to un-like from. A comment does toggle.
+                text = if (!post.isOpening && post.liked) "取消点赞" else "直接点赞",
+                onClick = { onPick(0) },
+                modifier = Modifier.fillMaxWidth(),
+                primary = true,
+                compact = true
+            )
+            if (amounts.isNotEmpty()) {
+                Gap(9)
+                Text(
+                    text = "或者打赏积分，打赏过的不能取消",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textTertiary
+                )
+                Gap(7)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    amounts.forEach { amount ->
+                        Box(modifier = Modifier.weight(1f)) {
+                            GlassButton(
+                                text = "$amount",
+                                onClick = { onPick(amount) },
+                                modifier = Modifier.fillMaxWidth(),
+                                primary = false,
+                                compact = true
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Transient status line for reply results and refresh failures. Tap to dismiss. */
 @Composable
-private fun NoticeBar(text: String, onDismiss: () -> Unit) {
+internal fun NoticeBar(text: String, onDismiss: () -> Unit) {
     val tokens = LocalTokens.current
     Row(
         modifier = Modifier
@@ -707,7 +1034,12 @@ private fun NoticeBar(text: String, onDismiss: () -> Unit) {
  * so it carries no login branch of its own - that is §6.1's bar inside the list.
  */
 @Composable
-private fun ReplyBar(posting: Boolean, onSend: (String, () -> Unit) -> Unit) {
+private fun ReplyBar(
+    posting: Boolean,
+    quoting: Post?,
+    onCancelQuote: () -> Unit,
+    onSend: (String, () -> Unit) -> Unit
+) {
     val tokens = LocalTokens.current
     var text by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -715,6 +1047,34 @@ private fun ReplyBar(posting: Boolean, onSend: (String, () -> Unit) -> Unit) {
 
     Column(modifier = Modifier.fillMaxWidth().imePadding()) {
         Hairline()
+        // Who we are answering, when it is not the topic itself. The quote line
+        // goes into the body at send time, so it is not shown in the field.
+        if (quoting != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "回复 #${quoting.floor} ${quoting.author}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tokens.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = "取消",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tokens.accentWarm,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = onCancelQuote)
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -733,7 +1093,7 @@ private fun ReplyBar(posting: Boolean, onSend: (String, () -> Unit) -> Unit) {
             ) {
                 if (text.isEmpty()) {
                     Text(
-                        text = "写下你的评论…",
+                        text = if (quoting == null) "写下你的评论…" else "回复 ${quoting.author}…",
                         style = MaterialTheme.typography.bodyMedium,
                         color = tokens.textTertiary
                     )

@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  GET /direct_messages - the conversation list. Structure verbatim; the display
+  names and the message previews are real people's, so those are replaced.
+
+  This fixture exists because the list parser was looking for `.dm-item`,
+  `.dm-preview`, `.dm-time` and four more classes that do not appear anywhere on
+  the real page - the site calls these `.direct-messages-conversation` and friends.
+  Every signed-in user with private messages saw an empty 私信 screen.
+
+  Note the partner's user id is on the avatar as `data-online-user-id`; the row
+  links to the thread, not to a profile, so there is no /user/<id> href to read.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>私信 - LINUX SB</title></head>
+<body>
+<div class="direct-messages-conversations"><a class="direct-messages-conversation" href="/direct_messages/8823"><span class="direct-messages-list-avatar" data-online-user-id="8823"><img class="avatar-img" src="/app/avatars/bottts-neutral_37.svg" alt="联系人" loading="lazy"></span><span class="direct-messages-list-main"><span><strong>甲</strong><time>2026-08-14</time></span><small>第 1 个会话的最后一条消息。</small></span></a><a class="direct-messages-conversation" href="/direct_messages/425"><span class="direct-messages-list-avatar" data-online-user-id="425"><img class="avatar-img" src="/app/avatars/dylan_41.svg" alt="联系人" loading="lazy"></span><span class="direct-messages-list-main"><span><strong>乙</strong><time>2026-08-14</time></span><small>第 2 个会话的最后一条消息。</small></span></a><a class="direct-messages-conversation" href="/direct_messages/12053"><span class="direct-messages-list-avatar" data-online-user-id="12053"><img class="avatar-img" src="/app/upload/avatar_upload/61/12053.jpg?v=1786258448010831" alt="联系人" loading="lazy"></span><span class="direct-messages-list-main"><span><strong>丙</strong><time>2026-08-13</time></span><small>第 3 个会话的最后一条消息。</small></span></a></div>
+</body>
+</html>

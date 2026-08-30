@@ -8,12 +8,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,6 +27,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,12 +36,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Conversation
+import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
 import StarBase.Android.Forum.data.ThemeMode
 import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
+import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
 import StarBase.Android.Forum.ui.EmptyPanel
 import StarBase.Android.Forum.ui.ErrorPanel
@@ -62,9 +68,13 @@ import StarBase.Android.Forum.ui.components.UserAvatar
 import StarBase.Android.Forum.ui.components.tierColor
 import StarBase.Android.Forum.ui.components.tierLabel
 import StarBase.Android.Forum.ui.failureOf
+import StarBase.Android.Forum.ui.glass.GlassButton
+import StarBase.Android.Forum.ui.glass.GlassLevel
 import StarBase.Android.Forum.ui.glass.GlassTabs
+import StarBase.Android.Forum.ui.glass.liquidGlass
 import StarBase.Android.Forum.ui.theme.LocalTokens
 import StarBase.Android.Forum.ui.theme.SbMetrics
+import StarBase.Android.Forum.ui.theme.SbRadius
 
 // ---- 通知 --------------------------------------------------------------------
 
@@ -234,6 +244,7 @@ fun MessagesScreen(
     signedIn: Boolean,
     onBack: () -> Unit,
     onLogin: () -> Unit,
+    onThread: (Int) -> Unit,
     onOpenSite: (String) -> Unit
 ) {
     // First appearance, and again on the way back from a thread opened in the
@@ -276,15 +287,280 @@ fun MessagesScreen(
                         itemsIndexed(s.value, key = { i, c -> "${c.id}-$i" }) { index, item ->
                             if (index > 0) Hairline(startInset = 66)
                             ConversationRow(item) {
-                                // Threads render inside the site page so the reply
-                                // form stays the site's own.
-                                onOpenSite("${Site.MESSAGES}/${item.id}".removeSuffix("/"))
+                                // A thread is a screen of our own now, with its own
+                                // compose box - it no longer hands off to the site.
+                                onThread(item.peerId)
                             }
                         }
                         item("tail") { Gap(24) }
                     }
                 }
             }
+        }
+    }
+}
+
+// ---- 私信会话 ----------------------------------------------------------------
+
+class ThreadViewModel : ViewModel() {
+    var state by mutableStateOf<Load<Parse.Thread>>(Load.Loading)
+        private set
+    var refreshing by mutableStateOf(false)
+        private set
+    var sending by mutableStateOf(false)
+        private set
+    var notice by mutableStateOf("")
+        private set
+
+    private var partnerId = 0
+
+    /** A thread collects replies while it is open, so this window is short. */
+    private val fresh = Freshness(windowMs = 45_000L)
+    private var inFlight = false
+
+    val ageSeconds: Long get() = fresh.ageSeconds
+
+    fun open(id: Int) {
+        if (id == partnerId && state is Load.Ready) {
+            if (fresh.stale) load()
+            return
+        }
+        partnerId = id
+        fresh.invalidate()
+        load(initial = true)
+    }
+
+    fun refreshIfStale() {
+        if (fresh.stale && state is Load.Ready) load()
+    }
+
+    fun load(initial: Boolean = false) {
+        if (inFlight || partnerId == 0) return
+        inFlight = true
+        viewModelScope.launch {
+            if (initial) state = Load.Loading else refreshing = true
+            try {
+                state = Load.Ready(Api.thread(partnerId))
+                fresh.mark()
+            } catch (e: Throwable) {
+                if (state !is Load.Ready) state = failureOf(e) else notice = e.message.orEmpty()
+            } finally {
+                refreshing = false
+                inFlight = false
+            }
+        }
+    }
+
+    /** Sends, then re-reads so the sent message comes from the server. */
+    fun send(text: String, onSent: () -> Unit) {
+        if (sending || text.isBlank()) return
+        sending = true
+        viewModelScope.launch {
+            try {
+                val result = Api.sendMessage(partnerId, text)
+                notice = result.message
+                onSent()
+                fresh.invalidate()
+                load()
+            } catch (e: Throwable) {
+                notice = e.message ?: "私信发送失败"
+            } finally {
+                sending = false
+            }
+        }
+    }
+
+    fun clearNotice() { notice = "" }
+}
+
+@Composable
+fun ThreadScreen(
+    partnerId: Int,
+    vm: ThreadViewModel,
+    onBack: () -> Unit,
+    onUser: (Int) -> Unit,
+    onLogin: () -> Unit
+) {
+    LaunchedEffect(partnerId) { vm.open(partnerId) }
+    OnReturnToForeground(partnerId) { vm.refreshIfStale() }
+
+    val thread = (vm.state as? Load.Ready)?.value
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        DetailBar(
+            title = thread?.partner.orEmpty().ifBlank { "私信" },
+            subtitle = freshnessText(vm.ageSeconds, vm.refreshing),
+            onBack = onBack,
+            action = "刷新",
+            onAction = { vm.load() }
+        )
+
+        when (val s = vm.state) {
+            is Load.Loading -> LoadingMark()
+            is Load.Failed -> ErrorPanel(s.message, s.kind, { vm.load() }, onLogin)
+            is Load.Ready -> Column(modifier = Modifier.fillMaxWidth().weight(1f, fill = true)) {
+                if (vm.notice.isNotBlank()) {
+                    NoticeBar(vm.notice) { vm.clearNotice() }
+                }
+                Refreshable(
+                    refreshing = vm.refreshing,
+                    onRefresh = { vm.load() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (s.value.messages.isEmpty()) {
+                        EmptyPanel("还没有消息", "写下第一句")
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                            item("head") { Gap(10) }
+                            itemsIndexed(
+                                s.value.messages,
+                                key = { i, m -> "$i-${m.timeText}" }
+                            ) { _, message ->
+                                MessageBubble(
+                                    message = message,
+                                    partnerAvatar = s.value.partnerAvatar,
+                                    onUser = { onUser(s.value.partnerId) }
+                                )
+                            }
+                            item("tail") { Gap(12) }
+                        }
+                    }
+                }
+                ComposeBar(
+                    sending = vm.sending,
+                    partner = s.value.partner,
+                    onSend = { text, done -> vm.send(text) { done() } }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One message. Ours sits right and carries no avatar; theirs sits left with one -
+ * the asymmetry is what tells them apart at a glance, so neither needs a label.
+ */
+@Composable
+private fun MessageBubble(
+    message: DirectMessage,
+    partnerAvatar: String,
+    onUser: () -> Unit
+) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 5.dp),
+        horizontalArrangement = if (message.fromMe) Arrangement.End else Arrangement.Start
+    ) {
+        if (!message.fromMe) {
+            UserAvatar(
+                name = message.sender,
+                url = partnerAvatar,
+                size = 32.dp,
+                onClick = onUser
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        Column(
+            modifier = Modifier.weight(1f, fill = false),
+            horizontalAlignment = if (message.fromMe) Alignment.End else Alignment.Start
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(SbRadius.field))
+                    .background(
+                        if (message.fromMe) tokens.accentWarm.copy(alpha = 0.16f)
+                        else tokens.glassLow
+                    )
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+            ) {
+                Text(
+                    text = message.body,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = tokens.textPrimary
+                )
+            }
+            if (message.timeText.isNotBlank()) {
+                Gap(3)
+                MetaText(dmTime(message.timeText))
+            }
+        }
+    }
+}
+
+/** `2026-08-13T15:00:11+08:00` is not something to show; the clock time is. */
+private fun dmTime(raw: String): String {
+    val t = raw.substringAfter('T', "").take(5)
+    return if (t.length == 5) "${raw.substringBefore('T')} $t" else raw
+}
+
+/** 私信输入框. Mirrors 帖子页的回复条 so the two feel like one gesture. */
+@Composable
+private fun ComposeBar(
+    sending: Boolean,
+    partner: String,
+    onSend: (String, () -> Unit) -> Unit
+) {
+    val tokens = LocalTokens.current
+    var text by remember { mutableStateOf("") }
+    val keyboard = LocalSoftwareKeyboardController.current
+    // The site caps a private message at 500 characters.
+    val tooLong = text.length > 500
+    val enabled = text.isNotBlank() && !sending && !tooLong
+
+    Column(modifier = Modifier.fillMaxWidth().imePadding()) {
+        Hairline()
+        if (tooLong) {
+            Text(
+                text = "私信最多 500 字，现在 ${text.length} 字",
+                style = MaterialTheme.typography.labelMedium,
+                color = tokens.hotTint,
+                modifier = Modifier.padding(start = 12.dp, top = 8.dp)
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .liquidGlass(
+                        shape = RoundedCornerShape(SbRadius.field),
+                        level = GlassLevel.MEDIUM,
+                        refract = false
+                    )
+                    .padding(horizontal = 13.dp, vertical = 12.dp)
+            ) {
+                if (text.isEmpty()) {
+                    Text(
+                        text = if (partner.isBlank()) "写下私信…" else "发给 $partner…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = tokens.textTertiary
+                    )
+                }
+                BasicTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = tokens.textPrimary),
+                    cursorBrush = SolidColor(tokens.accentWarm),
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Spacer(Modifier.width(9.dp))
+            GlassButton(
+                text = if (sending) "发送中" else "发送",
+                onClick = {
+                    keyboard?.hide()
+                    onSend(text) { text = "" }
+                },
+                enabled = enabled,
+                modifier = Modifier.width(74.dp)
+            )
         }
     }
 }

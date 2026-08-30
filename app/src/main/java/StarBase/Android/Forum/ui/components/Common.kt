@@ -209,7 +209,10 @@ fun PageHead(
     title: String,
     subtitle: String? = null,
     action: String? = null,
-    onAction: (() -> Unit)? = null
+    onAction: (() -> Unit)? = null,
+    /** A second pill, left of [action]. 发帖 on 首页 is what this is for. */
+    secondAction: String? = null,
+    onSecondAction: (() -> Unit)? = null
 ) {
     val tokens = LocalTokens.current
     Row(
@@ -234,6 +237,10 @@ fun PageHead(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+        if (secondAction != null && onSecondAction != null) {
+            LightAction(text = secondAction, onClick = onSecondAction)
+            Spacer(Modifier.width(8.dp))
         }
         if (action != null && onAction != null) {
             LightAction(text = action, onClick = onAction)

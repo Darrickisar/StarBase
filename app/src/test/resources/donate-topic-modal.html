@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  The modal.html out of `GET /donate?topic_id=<id>` (XHR), verbatim bar _csrf,
+  request_key, the topic title and the account's own point balance.
+
+  This exists because 主楼 and 评论 are two unrelated mechanisms, and the app tried
+  to like the topic the way it likes a comment - so 点赞打赏 on the opening post
+  failed with 「这条评论上没有点赞入口」:
+
+    comment : a form already on the page  -> /donate_reply_reaction
+              donate_reaction_reply_id + donate_reaction_points (tiers 1,5,10,50)
+    topic   : no form on the page at all  -> /donate
+              topic_id + request_key + optional amount (presets 6,10,33,66,88)
+
+  `request_key` is one-shot and belongs to the modal that was just served, so the
+  form must be read from the same response that is about to be posted back.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>点赞打赏面板 - LINUX SB</title></head>
+<body>
+<div class="donate-modal"><div class="donate-modal-head"><strong>点赞打赏《测试帖》</strong></div><div class="donate-modal-info">已打赏 200 人次 · 已点赞 192 次 · 共 6942 积分 · 我的积分 1000</div><form method="post" action="/donate" data-donate-form data-no-ajax="1"><input type="hidden" name="_csrf" value="0000000000000000000000000000000000000000000000000000000000000000"><input type="hidden" name="topic_id" value="17536"><input type="hidden" name="request_key" value="00000000000000000000000000000000"><div class="donate-presets"><button type="button" class="donate-preset-btn" data-amount="6">6</button><button type="button" class="donate-preset-btn" data-amount="10">10</button><button type="button" class="donate-preset-btn" data-amount="33">33</button><button type="button" class="donate-preset-btn" data-amount="66">66</button><button type="button" class="donate-preset-btn" data-amount="88">88</button></div><div class="donate-custom"><label class="donate-grid"><span>自定义金额</span><input type="number" name="amount" class="donate-custom-input" min="1" max="99" placeholder="不填写则只点赞"></label></div><button type="submit" class="donate-submit-btn" data-donate-submit data-loading-text="处理中">直接点赞</button></form></div>
+</body>
+</html>

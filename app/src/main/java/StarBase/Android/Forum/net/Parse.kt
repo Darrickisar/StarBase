@@ -5,6 +5,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import StarBase.Android.Forum.data.Board
 import StarBase.Android.Forum.data.Conversation
+import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.ForumRef
 import StarBase.Android.Forum.data.GachaAction
@@ -70,6 +71,23 @@ object Parse {
 
     /** A hand-written quote leaves "@某人 #12" at the top of the body. */
     private val mentionedFloor = Regex("""@[^\s#]+\s+#([1-9]\d*)""")
+
+    /**
+     * The quote line to put in front of a reply body, or "" for a plain reply.
+     *
+     * Quoting is not a form field on this site: the reply handler reads the parent
+     * floor back out of the body text, and [mentionedFloor] is the shape it looks
+     * for. Writing it here rather than in the UI keeps the two directions in one
+     * file, so a change to the pattern cannot break only one of them.
+     *
+     * The author's name goes in verbatim except for whitespace, which would split
+     * the mention, and a '#', which would move where the floor appears to start.
+     */
+    fun quotePrefix(post: Post?): String {
+        if (post == null || post.floor <= 0) return ""
+        val name = post.author.replace(Regex("""[\s#]+"""), "").ifBlank { "楼主" }
+        return "@$name #${post.floor}\n"
+    }
 
     private val postAnchor = Regex("""^post-([1-9]\d*)$""")
 
@@ -333,6 +351,266 @@ object Parse {
             doc.title().startsWith("注册")
     }
 
+    // ---- forms we submit -----------------------------------------------------
+
+    /**
+     * A form read off a page, ready to be posted back.
+     *
+     * Every write on this site (回帖, 发帖, 点赞, 私信) works the same way: the
+     * server renders a form carrying `_csrf` and a pile of hidden state, and the
+     * site's own JS posts `new FormData(form)` at `form.action`. Guessing field
+     * names instead is how 回帖 silently broke - it sent `content` where the
+     * markup says `body`, to `/topic/{id}` instead of the form's own action, so
+     * the POST never reached the reply handler at all.
+     *
+     * So: never name a field from memory. Read the form, set the one or two
+     * values the user typed, post everything else back untouched.
+     */
+    data class SiteForm(
+        val action: String,
+        val post: Boolean,
+        /** Every submittable field, in document order, with the site's own values. */
+        val fields: Map<String, String>,
+        /**
+         * Names of the form's `<textarea>`s, in document order. The body field of
+         * a reply or a new topic is the first one; naming it is the caller's job
+         * only when a form has several.
+         */
+        val textareas: List<String>,
+        /**
+         * True when the form declares `multipart/form-data`. 发帖 does, and posting
+         * it url-encoded is a different request from the one the site expects.
+         */
+        val multipart: Boolean,
+        /**
+         * True when the form carries a Cloudflare Turnstile widget. Its token is
+         * minted by JS in a browser, so such a form cannot be posted natively -
+         * the caller has to hand the job to a WebView instead of failing.
+         */
+        val turnstile: Boolean
+    ) {
+        /** The conventional body field: a form's first textarea. */
+        val bodyField: String get() = textareas.firstOrNull().orEmpty()
+
+        /** This form's fields with [values] applied on top. */
+        fun with(vararg values: Pair<String, String>): Map<String, String> =
+            LinkedHashMap(fields).apply { values.forEach { (k, v) -> put(k, v) } }
+    }
+
+    /**
+     * Reads the first form matching [css], the way a browser would submit it.
+     *
+     * Mirrors `new FormData(form)`: unchecked checkboxes and radios contribute
+     * nothing, a `<select>` contributes its selected option, and a disabled field
+     * contributes nothing. Textareas are collected empty - the caller fills them.
+     * A submit button's `name`/`value` is included only when the site put one
+     * there, because some handlers switch on it.
+     */
+    fun formOf(doc: Document, css: String): SiteForm? {
+        val form = doc.selectFirst(css) ?: return null
+
+        val fields = LinkedHashMap<String, String>()
+        val textareas = mutableListOf<String>()
+
+        for (el in form.select("input[name], textarea[name], select[name], button[name]")) {
+            val name = el.attr("name")
+            if (name.isBlank() || el.hasAttr("disabled")) continue
+
+            when (el.tagName()) {
+                "textarea" -> {
+                    textareas += name
+                    fields[name] = el.wholeText()
+                }
+
+                "select" -> {
+                    val option = el.selectFirst("option[selected]") ?: el.selectFirst("option")
+                    fields[name] = option?.let {
+                        if (it.hasAttr("value")) it.attr("value") else it.text().trim()
+                    }.orEmpty()
+                }
+
+                "button" -> {
+                    // Only a submit button submits, and only the one that was
+                    // pressed. Keeping the first is the closest we get.
+                    val type = el.attr("type").ifBlank { "submit" }
+                    if (type == "submit" && !fields.containsKey(name)) {
+                        fields[name] = el.attr("value")
+                    }
+                }
+
+                else -> when (el.attr("type").lowercase().ifBlank { "text" }) {
+                    // An unchecked box or radio is simply absent from a real submit.
+                    "checkbox" -> if (el.hasAttr("checked")) {
+                        fields[name] = el.attr("value").ifBlank { "on" }
+                    }
+                    "radio" -> if (el.hasAttr("checked")) fields[name] = el.attr("value")
+                    // A file input cannot be reproduced; attachments are their own
+                    // upload endpoint, so drop it rather than send an empty part.
+                    "file" -> Unit
+                    "submit", "button", "reset", "image" -> Unit
+                    else -> fields[name] = el.attr("value")
+                }
+            }
+        }
+
+        // An unchecked radio group contributes nothing, exactly as in a browser -
+        // this reader must not invent a choice the user did not make. 发帖 is why:
+        // `topic_special_type` ships with `lottery` and `virtual_card` and neither
+        // checked, because 普通帖 (value="") is added by the site's own script. A
+        // "take the group's first option" rule would post every new topic as a
+        // 抽奖帖. Callers that need a default set it themselves.
+
+        return SiteForm(
+            // A form with no action posts back to the page it came from - 发帖 is
+            // served that way, so the document's own URL is the fallback.
+            action = Site.absolute(form.attr("action")).ifBlank { doc.location().ifBlank { Site.BASE } },
+            post = !form.attr("method").equals("get", ignoreCase = true),
+            fields = fields,
+            textareas = textareas,
+            multipart = form.attr("enctype").contains("multipart", ignoreCase = true),
+            turnstile = form.selectFirst(".cf-turnstile, [data-sitekey]") != null
+        )
+    }
+
+    fun formOf(html: String, css: String): SiteForm? = formOf(Jsoup.parse(html, Site.BASE), css)
+
+    /**
+     * The reply form on a topic page.
+     *
+     * `.ajax-reply-form` is the class the site's own submit handler matches on
+     * (see the site's index.js), which makes it the one selector guaranteed to
+     * identify the form that actually accepts a reply.
+     */
+    fun replyForm(doc: Document): SiteForm? =
+        formOf(doc, "form.ajax-reply-form")
+            ?: formOf(doc, ".reply-panel form:has(textarea)")
+
+    /**
+     * The 发新帖 form at /topic_edit.
+     *
+     * The route is `topic_edit`, not `topic_new`, and the form carries no `action`
+     * at all - it posts back to the page it was served on. `id=0` is what marks
+     * this as a new topic rather than an edit.
+     */
+    fun newTopicForm(doc: Document): SiteForm? =
+        formOf(doc, "form:has(select[name=forum_id]):has(textarea[name=body])")
+            ?: formOf(doc, "form:has(input[name=title]):has(textarea)")
+
+    /** Boards the 发帖 form offers, in the order it lists them. */
+    fun boardOptions(doc: Document): List<Pair<Int, String>> =
+        doc.select("select[name=forum_id] option").mapNotNull { option ->
+            val id = option.attr("value").toIntOrNull() ?: return@mapNotNull null
+            id to option.text().trim()
+        }
+
+    /**
+     * The 点赞 form on one comment, found by the reply id the site anchors it to.
+     *
+     * Every comment carries its own copy of this form, so the reply id is the only
+     * way to tell them apart.
+     */
+    fun donateForm(doc: Document, replyId: Int): SiteForm? =
+        formOf(doc, "form.donate-reaction-form:has([data-reply-id=$replyId])")
+            ?: formOf(doc, "form:has(input[name=donate_reaction_reply_id][value=$replyId])")
+
+    /**
+     * The 打赏 form inside the topic-level donate modal.
+     *
+     * The opening post has no form on the page - only a link to `/donate?topic_id=…`
+     * whose JSON carries this. The `request_key` in it is one-shot, so the form has
+     * to be read from the response that is about to be posted back, never cached.
+     */
+    fun donateTopicForm(modalHtml: String): SiteForm? =
+        formOf(Jsoup.parse(modalHtml, Site.BASE), "form[data-donate-form]")
+            ?: formOf(Jsoup.parse(modalHtml, Site.BASE), "form[action*=donate]")
+
+    /** The topic-level 打赏 panel: what it offers and what it says. */
+    data class DonatePanel(
+        /** Preset amounts, from the modal's own buttons. */
+        val presets: List<Int> = emptyList(),
+        /** The 已打赏 … 我的积分 … line, shown as-is. */
+        val info: String = "",
+        /** Largest custom amount the input accepts; 0 when it says nothing. */
+        val maxAmount: Int = 0
+    )
+
+    fun donatePanel(modalHtml: String): DonatePanel {
+        val doc = Jsoup.parse(modalHtml, Site.BASE)
+        return DonatePanel(
+            presets = doc.select("[data-amount]")
+                .mapNotNull { it.attr("data-amount").toIntOrNull() }
+                .filter { it > 0 },
+            info = doc.textOf(".donate-modal-info"),
+            maxAmount = doc.selectFirst("input[name=amount]")?.attr("max")?.toIntOrNull() ?: 0
+        )
+    }
+
+    /**
+     * What the 点赞 button on one comment currently is.
+     *
+     * A reaction that was paid for cannot be taken back - the site says so with
+     * `data-coined` - so the app has to read this rather than assume a toggle.
+     */
+    data class Reaction(
+        val replyId: Int,
+        val liked: Boolean,
+        val coined: Boolean,
+        /** Point amounts the site offers, from `data-tiers`; 0 is a plain like. */
+        val tiers: List<Int>,
+        val authorName: String
+    )
+
+    fun reactionOf(doc: Document, replyId: Int): Reaction? {
+        val button = doc.selectFirst("[data-donate-reaction][data-reply-id=$replyId]")
+            ?: return null
+        return Reaction(
+            replyId = replyId,
+            liked = button.attr("data-liked") == "1",
+            coined = button.attr("data-coined") == "1",
+            tiers = button.attr("data-tiers").split(',')
+                .mapNotNull { it.trim().toIntOrNull() }
+                .filter { it > 0 },
+            authorName = button.attr("data-author-name").trim()
+        )
+    }
+
+    /**
+     * The 私信 compose box on a conversation page.
+     *
+     * Its body field is `content`, where a reply's is `body` - the site is not
+     * consistent across its own forms, which is why none of these names are
+     * written down anywhere but the markup.
+     */
+    fun dmComposeForm(doc: Document): SiteForm? =
+        formOf(doc, "form.direct-messages-compose")
+            ?: formOf(doc, "form:has(textarea[name=content]):not(.direct-messages-block-form)")
+
+    /**
+     * What the site answers a write with.
+     *
+     * All four write endpoints answer XHR with the same JSON shape: `ok`, plus a
+     * `message` to show, sometimes `html` for the row to append and a `redirect`
+     * that means the session died. Anything that is not JSON means the request
+     * never reached the handler.
+     */
+    data class WriteResult(
+        val ok: Boolean,
+        val message: String = "",
+        /** Rendered markup for what was just created, when the site sends it. */
+        val html: String = "",
+        /** Set when the site wants the browser to navigate - a dead session. */
+        val redirect: String = ""
+    ) {
+        /**
+         * Topic this write landed in, when the site said. 发帖 answers with a
+         * redirect to the new topic, which is the only place its id appears.
+         */
+        val topicId: Int
+            get() = Regex("""/topic/(\d+)""").find(redirect)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""/topic/(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull()
+                ?: 0
+    }
+
     // ---- search --------------------------------------------------------------
 
     /**
@@ -556,6 +834,9 @@ object Parse {
         val avatar = li.selectFirst(".post-avatar img.avatar-img")
         val uidBadge = li.select(".user-uid-badge").firstOrNull { it.text().contains("UID") }
         val content = li.selectFirst(".post-content")
+        // Carries whether we have liked this one, whether it was paid for, and the
+        // point amounts on offer. All three are attributes, not text.
+        val reactionButton = li.selectFirst("[data-donate-reaction]")
 
         return Post(
             id = li.id().ifBlank { "floor-$floor" },
@@ -577,6 +858,10 @@ object Parse {
             isOpening = opening,
             floor = floor,
             replyId = postAnchor.find(li.id())?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+            liked = reactionButton?.attr("data-liked") == "1",
+            coined = reactionButton?.attr("data-coined") == "1",
+            tiers = reactionButton?.attr("data-tiers").orEmpty()
+                .split(',').mapNotNull { it.trim().toIntOrNull() }.filter { it > 0 },
             parentFloor = parentFloor,
             replyCount = replyCount
         )
@@ -704,25 +989,79 @@ object Parse {
         }.filter { it.text.isNotBlank() }
     }
 
+    /**
+     * The conversation list on /direct_messages.
+     *
+     * Each row is an `<a class="direct-messages-conversation">` whose href is the
+     * thread, and the partner's user id is on the avatar as `data-online-user-id` -
+     * the row does not link to the profile, so that attribute is the only place the
+     * id appears.
+     */
     fun conversations(html: String): List<Conversation> {
         val doc = Jsoup.parse(html, Site.BASE)
-        return doc.select(".dm-item, .conversation-item, ul.dm-list > li").mapNotNull { li ->
-            val link = li.selectFirst("a") ?: return@mapNotNull null
-            val href = link.attr("href")
-            val peerLink = li.selectFirst("a[href*=/user/]")
+        return doc.select("a.direct-messages-conversation").mapNotNull { row ->
+            val href = row.attr("href")
+            val threadId = Regex("""/direct_messages/(\d+)""").find(href)?.groupValues?.get(1)
+                ?: return@mapNotNull null
+            val main = row.selectFirst(".direct-messages-list-main")
+            val peerId = row.selectFirst("[data-online-user-id]")
+                ?.attr("data-online-user-id")?.toIntOrNull()
+                ?: threadId.toIntOrNull() ?: 0
             Conversation(
-                id = Regex("""(\d+)""").find(href.substringAfterLast('/'))?.value.orEmpty(),
-                peer = li.textOf(".dm-peer, .peer-name").ifBlank {
-                    peerLink?.text()?.trim()
-                        ?: li.selectFirst("img")?.attr("alt")?.trim().orEmpty()
-                },
-                peerId = idFrom(peerLink?.attr("href").orEmpty(), "user"),
-                avatar = li.selectFirst("img")?.attrUrl("src").orEmpty(),
-                preview = li.textOf(".dm-preview, .preview, .last-message"),
-                timeText = li.textOf(".dm-time, .time, [data-performance-time]"),
-                unread = firstInt(li.textOf(".dm-unread, .unread-count, .badge"))
+                id = threadId,
+                peer = main?.textOf("strong")
+                    ?: row.selectFirst("img")?.attr("alt")?.trim().orEmpty(),
+                peerId = peerId,
+                avatar = row.selectFirst("img")?.attrUrl("src").orEmpty(),
+                preview = main?.textOf("small").orEmpty(),
+                timeText = main?.textOf("time").orEmpty(),
+                unread = firstInt(row.textOf(".direct-messages-unread, .unread-count, .badge"))
             )
         }.filter { it.peer.isNotBlank() }
+    }
+
+    /** One private-message thread. */
+    data class Thread(
+        val partnerId: Int,
+        val partner: String,
+        val partnerAvatar: String = "",
+        val messages: List<DirectMessage> = emptyList(),
+        /** Id of the newest message, which is what the site polls updates from. */
+        val lastId: Long = 0
+    )
+
+    /**
+     * The messages in one thread.
+     *
+     * The site marks the other person's messages `is-theirs` and leaves ours
+     * unmarked, so "not theirs" is the test - there is no `is-mine` class to look
+     * for.
+     */
+    fun thread(partnerId: Int, html: String): Thread {
+        val doc = Jsoup.parse(html, Site.conversation(partnerId))
+        val head = doc.selectFirst(".direct-messages-thread-user")
+
+        val messages = doc.select("article.direct-messages-message").map { article ->
+            val theirs = article.hasClass("is-theirs")
+            DirectMessage(
+                body = article.textOf(".direct-messages-content"),
+                timeText = article.selectFirst(".direct-messages-meta time")
+                    ?.let { it.attr("datetime").ifBlank { it.text() } }
+                    ?.trim().orEmpty(),
+                fromMe = !theirs,
+                sender = article.textOf(".direct-messages-meta strong")
+            )
+        }
+
+        return Thread(
+            partnerId = idFrom(head?.attr("href").orEmpty(), "user").takeIf { it > 0 } ?: partnerId,
+            partner = head?.textOf("strong").orEmpty()
+                .ifBlank { doc.selectFirst("title")?.text()?.substringBefore(" - ")?.trim().orEmpty() },
+            partnerAvatar = head?.selectFirst("img")?.attrUrl("src").orEmpty(),
+            messages = messages,
+            lastId = doc.selectFirst(".direct-messages-thread")
+                ?.attr("data-last-id")?.toLongOrNull() ?: 0
+        )
     }
 
     fun profile(id: Int, html: String): Profile {

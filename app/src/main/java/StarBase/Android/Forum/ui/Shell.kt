@@ -76,8 +76,12 @@ import StarBase.Android.Forum.ui.screens.MessagesScreen
 import StarBase.Android.Forum.ui.screens.MessagesViewModel
 import StarBase.Android.Forum.ui.screens.MineEntry
 import StarBase.Android.Forum.ui.screens.MineScreen
+import StarBase.Android.Forum.ui.screens.NewTopicScreen
+import StarBase.Android.Forum.ui.screens.NewTopicViewModel
 import StarBase.Android.Forum.ui.screens.NotificationsScreen
 import StarBase.Android.Forum.ui.screens.NotifyViewModel
+import StarBase.Android.Forum.ui.screens.ThreadScreen
+import StarBase.Android.Forum.ui.screens.ThreadViewModel
 import StarBase.Android.Forum.ui.screens.ProfileScreen
 import StarBase.Android.Forum.ui.screens.ProfileViewModel
 import StarBase.Android.Forum.ui.screens.RankScreen
@@ -114,6 +118,10 @@ sealed interface Route {
     data object Gacha : Route
     data object Notifications : Route
     data object Messages : Route
+    /** One private-message thread, keyed by the other person's user id. */
+    data class Thread(val partnerId: Int) : Route
+    /** 发新帖. [forumId] preselects a board when it comes from that board's page. */
+    data class NewTopic(val forumId: Int = 0) : Route
     data object Bookmarks : Route
     data object Settings : Route
     data class Login(val register: Boolean = false) : Route
@@ -139,6 +147,8 @@ private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     Route.Gacha -> "gacha"
     Route.Notifications -> "notifications"
     Route.Messages -> "messages"
+    is Route.Thread -> "thread:${route.partnerId}"
+    is Route.NewTopic -> "new-topic"
     Route.Bookmarks -> "bookmarks"
     Route.Settings -> "settings"
 }
@@ -154,6 +164,8 @@ fun Shell(store: UserStore) {
     val explore: ExploreViewModel = viewModel()
     val rank: RankViewModel = viewModel()
     val notify: NotifyViewModel = viewModel()
+    val thread: ThreadViewModel = viewModel()
+    val newTopic: NewTopicViewModel = viewModel()
     val messages: MessagesViewModel = viewModel()
     val profile: ProfileViewModel = viewModel()
     val gacha: GachaViewModel = viewModel()
@@ -345,7 +357,8 @@ fun Shell(store: UserStore) {
                                     }
                                 },
                                 onLogin = { push(Route.Login()) },
-                                onRegister = { push(Route.Login(register = true)) }
+                                onRegister = { push(Route.Login(register = true)) },
+                                onNewTopic = { push(Route.NewTopic()) }
                             )
 
                             is Route.Topic -> {
@@ -382,7 +395,9 @@ fun Shell(store: UserStore) {
                                 onTopic = ::openTopic,
                                 onUser = ::openUser,
                                 onBack = ::pop,
-                                onLogin = { push(Route.Login()) }
+                                onLogin = { push(Route.Login()) },
+                                // Posting from a board preselects that board.
+                                onNewTopic = { push(Route.NewTopic(it)) }
                             )
 
                             is Route.User -> ProfileScreen(
@@ -425,7 +440,36 @@ fun Shell(store: UserStore) {
                                 signedIn = session.signedIn,
                                 onBack = ::pop,
                                 onLogin = { push(Route.Login()) },
+                                onThread = { push(Route.Thread(it)) },
                                 onOpenSite = { openSitePage("私信", it) }
+                            )
+
+                            is Route.Thread -> ThreadScreen(
+                                partnerId = route.partnerId,
+                                vm = thread,
+                                onBack = {
+                                    // Sending moves a conversation up the list, so
+                                    // the list has to be re-read on the way back.
+                                    messages.load(force = true)
+                                    pop()
+                                },
+                                onUser = ::openUser,
+                                onLogin = { push(Route.Login()) }
+                            )
+
+                            is Route.NewTopic -> NewTopicScreen(
+                                vm = newTopic,
+                                forumId = route.forumId,
+                                onBack = ::pop,
+                                onPosted = { topicId ->
+                                    pop()
+                                    // Straight into what was just written, and the
+                                    // feeds behind it are now a post out of date.
+                                    home.load(force = true)
+                                    if (topicId > 0) openTopic(topicId)
+                                },
+                                onLogin = { push(Route.Login()) },
+                                onOpenSite = { openSitePage("发新帖", it) }
                             )
 
                             Route.Bookmarks -> BookmarksScreen(
@@ -483,7 +527,8 @@ private fun TabContent(
     onDiscoverEntry: (DiscoverEntry) -> Unit,
     onMineEntry: (MineEntry) -> Unit,
     onLogin: () -> Unit,
-    onRegister: () -> Unit
+    onRegister: () -> Unit,
+    onNewTopic: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         when (tab) {
@@ -493,7 +538,8 @@ private fun TabContent(
                 onForum = onForum,
                 onAllForums = onAllForums,
                 onUser = onUser,
-                onLogin = onLogin
+                onLogin = onLogin,
+                onNewTopic = onNewTopic
             )
 
             Tab.FORUMS -> ForumListScreen(

@@ -305,7 +305,9 @@ fun ForumScreen(
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onBack: () -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    /** Opens 发新帖 with this board already chosen. */
+    onNewTopic: (Int) -> Unit
 ) {
     LaunchedEffect(forumId) { vm.open(forumId) }
     OnReturnToForeground(forumId) { vm.refreshIfStale() }
@@ -316,7 +318,9 @@ fun ForumScreen(
             subtitle = freshnessText(vm.ageSeconds, vm.refreshing),
             onBack = onBack,
             action = "刷新",
-            onAction = vm::refresh
+            onAction = vm::refresh,
+            secondAction = "发帖",
+            onSecondAction = { onNewTopic(forumId) }
         )
         when (val s = vm.state) {
             is Load.Loading -> LoadingMark()

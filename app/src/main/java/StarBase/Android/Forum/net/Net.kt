@@ -20,6 +20,18 @@ object Site {
     const val GACHA = "$BASE/gacha"
     const val SEARCH = "$BASE/search"
 
+    /** 发新帖. The site calls this `topic_edit`; `id=0` in the form means "new". */
+    const val NEW_TOPIC = "$BASE/topic_edit"
+
+    /** One private-message thread, keyed by the other person's user id. */
+    fun conversation(partnerId: Int) = "$MESSAGES/$partnerId"
+
+    /**
+     * 点赞打赏 panel for a topic. Answers XHR with JSON holding the real form - the
+     * opening post has no form on the page itself, unlike a comment.
+     */
+    fun donateModal(topicId: Int) = "$BASE/donate?topic_id=$topicId"
+
     fun forum(id: Int, page: Int = 1, sort: String = "") = buildString {
         append("$BASE/forum/$id")
         val q = mutableListOf<String>()
@@ -139,6 +151,25 @@ object Net {
                 }
             }
             .get()
+            .build()
+        return execute(req)
+    }
+
+    /**
+     * POST of an already-built body of any kind. Blocking - call from IO.
+     *
+     * Separate from [postForm] because some of the site's forms declare
+     * `multipart/form-data` and posting those url-encoded is a different request
+     * from the one the handler was written for.
+     */
+    fun postBody(url: String, body: okhttp3.RequestBody, ajax: Boolean = true): String {
+        val req = base(url)
+            .apply {
+                if (ajax) header("X-Requested-With", "XMLHttpRequest")
+                header("Accept", "application/json, text/html;q=0.9,*/*;q=0.8")
+                header("Origin", Site.BASE)
+            }
+            .post(body)
             .build()
         return execute(req)
     }

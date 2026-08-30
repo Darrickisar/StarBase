@@ -208,7 +208,8 @@ fun HomeScreen(
     onForum: (Int) -> Unit,
     onAllForums: () -> Unit,
     onUser: (Int) -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    onNewTopic: () -> Unit
 ) {
     // Fires once when the screen first appears, then again on every return to
     // the foreground - so the first read and the catch-up read are the same path
@@ -233,7 +234,8 @@ fun HomeScreen(
                 onTopic = onTopic,
                 onForum = onForum,
                 onAllForums = onAllForums,
-                onUser = onUser
+                onUser = onUser,
+                onNewTopic = onNewTopic
             )
         }
     }
@@ -246,7 +248,8 @@ private fun HomeContent(
     onTopic: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onAllForums: () -> Unit,
-    onUser: (Int) -> Unit
+    onUser: (Int) -> Unit,
+    onNewTopic: () -> Unit
 ) {
     val listState = rememberLazyListState()
 
@@ -266,7 +269,11 @@ private fun HomeContent(
             PageHead(
                 title = "StarBase",
                 action = if (vm.refreshing) "更新中" else "刷新",
-                onAction = { vm.load(force = true) }
+                onAction = { vm.load(force = true) },
+                // No board preselected here: 发帖 from 首页 means "somewhere", and
+                // the form's own default is a better guess than ours.
+                secondAction = "发帖",
+                onSecondAction = onNewTopic
             )
             StatStrip(home.stats)
         }
