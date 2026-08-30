@@ -546,6 +546,40 @@ object Parse {
     }
 
     /**
+     * The attachment uploader that sits beside a body field.
+     *
+     * Not part of the form it appears in: the file goes to its own endpoint, and
+     * what comes back is markdown to paste into the body. Everything here is read
+     * off the page, so the size cap and the accepted extensions are the site's.
+     */
+    data class Uploader(
+        val action: String,
+        val csrf: String,
+        /** Size cap in MB; 0 when the page states none. */
+        val maxMb: Int,
+        /** Accepted extensions, `.png` style, as the file input lists them. */
+        val accepts: List<String>
+    )
+
+    fun uploaderOf(doc: Document): Uploader? {
+        val box = doc.selectFirst("[data-upload-url]") ?: return null
+        val action = Site.absolute(box.attr("data-upload-url"))
+        if (action.isBlank()) return null
+        val csrf = csrfOf(doc)
+        if (csrf.isBlank()) return null
+        return Uploader(
+            action = action,
+            csrf = csrf,
+            maxMb = box.attr("data-upload-max-mb").toIntOrNull() ?: 0,
+            accepts = box.selectFirst("input[type=file][accept]")
+                ?.attr("accept").orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.startsWith(".") }
+        )
+    }
+
+    /**
      * What the 点赞 button on one comment currently is.
      *
      * A reaction that was paid for cannot be taken back - the site says so with
@@ -715,6 +749,12 @@ object Parse {
     // ---- post content --------------------------------------------------------
 
     /** Reduces a post body to our own block list, keeping images and code. */
+    /** Tags that are part of a run of text rather than a block of their own. */
+    private val inlineTags = setOf(
+        "a", "b", "strong", "i", "em", "u", "s", "del", "ins", "small", "span",
+        "code", "sub", "sup", "mark", "br", "font", "abbr", "kbd"
+    )
+
     private fun blocksOf(content: Element): List<LiveBlock> {
         // Long posts are wrapped in a fold container; the real body is inside.
         val root = content.selectFirst("[data-long-content-fold]") ?: content
@@ -726,6 +766,72 @@ object Parse {
             out += LiveBlock(LiveBlock.Type.IMAGE, src = Site.absolute(src), text = img.attr("alt"))
         }
 
+        /**
+         * The text of an inline run, plus where its anchors sit in it.
+         *
+         * The offsets have to line up with the string exactly, so this builds both
+         * in one pass instead of running `text()` and then searching for each label -
+         * two links with the same label would be indistinguishable that way.
+         */
+        fun inline(el: Element): Pair<String, List<LiveBlock.Link>> {
+            val sb = StringBuilder()
+            val links = mutableListOf<LiveBlock.Link>()
+
+            // Jsoup's own text() collapses runs of whitespace to one space; matching
+            // that keeps paragraphs reading the way they did before this change.
+            fun append(raw: String) {
+                for (ch in raw) {
+                    val c = if (ch == ' ') ' ' else ch
+                    if (c.isWhitespace()) {
+                        if (sb.isNotEmpty() && sb.last() != ' ') sb.append(' ')
+                    } else {
+                        sb.append(c)
+                    }
+                }
+            }
+
+            fun descend(node: org.jsoup.nodes.Node) {
+                when (node) {
+                    is org.jsoup.nodes.TextNode -> append(node.wholeText)
+                    is Element -> when (node.tagName().lowercase()) {
+                        // A <br> is a line break inside a paragraph, not a space.
+                        "br" -> if (sb.isNotEmpty() && sb.last() != '\n') sb.append('\n')
+                        "a" -> {
+                            val start = sb.length
+                            node.childNodes().forEach { descend(it) }
+                            val href = node.attr("href").trim()
+                            if (sb.length > start && href.isNotBlank()) {
+                                links += LiveBlock.Link(start, sb.length, Site.absolute(href))
+                            }
+                        }
+                        // Images inside a paragraph are emitted as their own blocks
+                        // by the caller; they contribute no text here.
+                        "img" -> Unit
+                        else -> node.childNodes().forEach { descend(it) }
+                    }
+                }
+            }
+
+            el.childNodes().forEach { descend(it) }
+
+            // The ranges were recorded against the untrimmed builder, so dropping
+            // leading whitespace has to shift them by the same amount or every label
+            // ends up off by one.
+            val raw = sb.toString()
+            val lead = raw.length - raw.trimStart().length
+            val text = raw.trim()
+            val shifted = links
+                .map { LiveBlock.Link(it.start - lead, it.end - lead, it.href) }
+                .filter { it.start >= 0 && it.end <= text.length && it.start < it.end }
+            return text to shifted
+        }
+
+        /** A paragraph-like run, keeping whatever links it holds. */
+        fun emitPara(el: Element, type: LiveBlock.Type = LiveBlock.Type.PARA) {
+            val (text, links) = inline(el)
+            if (text.isNotBlank()) out += LiveBlock(type, text = text, links = links)
+        }
+
         fun walk(el: Element) {
             when (el.tagName().lowercase()) {
                 "p", "div" -> {
@@ -734,32 +840,26 @@ object Parse {
                     val text = el.text().trim()
                     if (imgs.isNotEmpty()) {
                         imgs.forEach { emitImage(it) }
-                        if (text.isNotBlank()) out += LiveBlock(LiveBlock.Type.PARA, text)
+                        emitPara(el)
                     } else if (el.tagName() == "p") {
-                        if (text.isNotBlank()) out += LiveBlock(LiveBlock.Type.PARA, text)
+                        emitPara(el)
                     } else {
                         el.children().forEach { walk(it) }
                         if (el.children().isEmpty() && text.isNotBlank()) {
-                            out += LiveBlock(LiveBlock.Type.PARA, text)
+                            emitPara(el)
                         }
                     }
                 }
-                "h1", "h2", "h3", "h4", "h5", "h6" ->
-                    el.text().trim().takeIf { it.isNotBlank() }?.let {
-                        out += LiveBlock(LiveBlock.Type.HEADING, it)
-                    }
-                "blockquote" ->
-                    el.text().trim().takeIf { it.isNotBlank() }?.let {
-                        out += LiveBlock(LiveBlock.Type.QUOTE, it)
-                    }
+                "h1", "h2", "h3", "h4", "h5", "h6" -> emitPara(el, LiveBlock.Type.HEADING)
+                // A quote is where a linked source most often sits, so it keeps its
+                // anchors too.
+                "blockquote" -> emitPara(el, LiveBlock.Type.QUOTE)
                 "pre" ->
                     el.wholeText().trimEnd().takeIf { it.isNotBlank() }?.let {
                         out += LiveBlock(LiveBlock.Type.CODE, it)
                     }
                 "ul", "ol" -> el.select("> li").forEach { li ->
-                    li.text().trim().takeIf { it.isNotBlank() }?.let {
-                        out += LiveBlock(LiveBlock.Type.LIST_ITEM, it)
-                    }
+                    emitPara(li, LiveBlock.Type.LIST_ITEM)
                 }
                 "img" -> emitImage(el)
                 "hr" -> out += LiveBlock(LiveBlock.Type.RULE)
@@ -781,9 +881,15 @@ object Parse {
                 }
                 else -> {
                     if (el.children().isEmpty()) {
-                        el.text().trim().takeIf { it.isNotBlank() }?.let {
-                            out += LiveBlock(LiveBlock.Type.PARA, it)
-                        }
+                        emitPara(el)
+                    } else if (el.selectFirst("> a[href]") != null && el.select("> *").all {
+                            it.tagName().lowercase() in inlineTags
+                        }) {
+                        // An inline-only wrapper (a bare <span>/<strong> holding a
+                        // link) is one run of text, not a container to descend into -
+                        // descending would emit the anchor as its own block and lose
+                        // the words around it.
+                        emitPara(el)
                     } else {
                         el.children().forEach { walk(it) }
                     }
@@ -1018,6 +1124,38 @@ object Parse {
                 unread = firstInt(row.textOf(".direct-messages-unread, .unread-count, .badge"))
             )
         }.filter { it.peer.isNotBlank() }
+    }
+
+    /**
+     * Someone found by the 私信 user search.
+     *
+     * Starting a conversation is not a separate action on this site: each result
+     * links straight at `/direct_messages/<uid>`, which renders the same thread page
+     * an existing conversation does, compose box included. So a new conversation is
+     * an empty one, and the app needs nothing beyond navigating there.
+     */
+    data class UserHit(
+        val userId: Int,
+        val name: String,
+        val avatar: String = ""
+    )
+
+    fun userSearch(html: String): List<UserHit> {
+        val doc = Jsoup.parse(html, Site.BASE)
+        return doc.select("a.direct-messages-search-result").mapNotNull { row ->
+            val id = Regex("""/direct_messages/(\d+)""").find(row.attr("href"))
+                ?.groupValues?.get(1)?.toIntOrNull()
+                ?: row.selectFirst("[data-online-user-id]")
+                    ?.attr("data-online-user-id")?.toIntOrNull()
+                ?: return@mapNotNull null
+            UserHit(
+                userId = id,
+                name = row.textOf("strong").ifBlank {
+                    row.selectFirst("img")?.attr("alt")?.trim().orEmpty()
+                },
+                avatar = row.selectFirst("img")?.attrUrl("src").orEmpty()
+            )
+        }.filter { it.name.isNotBlank() }
     }
 
     /** One private-message thread. */

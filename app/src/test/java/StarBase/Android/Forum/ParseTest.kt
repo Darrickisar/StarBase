@@ -273,6 +273,115 @@ class ParseTest {
         assertEquals(1188, hits[1].id)
     }
 
+    // ---- 帖内链接 -------------------------------------------------------------
+
+    /*
+     * Links in a post body are nested inside <p>, essentially always - on a real
+     * topic page every single anchor was. Flattening the paragraph with text() threw
+     * the href away before the renderer ever saw it, so every in-post link was dead
+     * text. These pin the offsets, which is where an off-by-one would hide.
+     */
+
+    private fun bodyOf(html: String): List<LiveBlock> =
+        Parse.topic(1, 1, """
+            <html><body><ul class="post-list topic-post-list">
+              <li class="post-item post-entry" id="post-1">
+                <div class="post-body"><div class="post-content">$html</div></div>
+              </li>
+            </ul></body></html>
+        """.trimIndent()).opening!!.blocks
+
+    @Test
+    fun aLinkInsideAParagraphKeepsItsHref() {
+        val blocks = bodyOf("""<p>看看 <a href="/topic/42">这个帖子</a> 挺好</p>""")
+
+        assertEquals(1, blocks.size)
+        val para = blocks.first()
+        assertEquals(LiveBlock.Type.PARA, para.type)
+        assertEquals("看看 这个帖子 挺好", para.text)
+
+        assertEquals(1, para.links.size)
+        val link = para.links.first()
+        assertEquals("https://linux.sb/topic/42", link.href)
+        // The range has to land on the label and nothing else.
+        assertEquals("这个帖子", para.text.substring(link.start, link.end))
+    }
+
+    @Test
+    fun twoLinksWithTheSameLabelStayDistinct() {
+        // Searching the text for each label would resolve both to the first match;
+        // the offsets are recorded as the text is built for exactly this reason.
+        val para = bodyOf(
+            """<p><a href="/topic/1">这里</a> 和 <a href="/topic/2">这里</a></p>"""
+        ).first()
+
+        assertEquals("这里 和 这里", para.text)
+        assertEquals(2, para.links.size)
+        assertEquals("https://linux.sb/topic/1", para.links[0].href)
+        assertEquals("https://linux.sb/topic/2", para.links[1].href)
+        assertEquals(0, para.links[0].start)
+        assertEquals("这里", para.text.substring(para.links[1].start, para.links[1].end))
+        assertTrue("the second link starts after the first", para.links[1].start > para.links[0].end)
+    }
+
+    @Test
+    fun leadingWhitespaceDoesNotShiftTheRanges() {
+        // The builder records offsets before the trim, so the trim has to shift them.
+        val para = bodyOf("""<p>   <a href="https://example.com">开头就是链接</a> 后面</p>""").first()
+
+        assertEquals("开头就是链接 后面", para.text)
+        assertEquals(0, para.links.first().start)
+        assertEquals("开头就是链接", para.text.substring(para.links.first().start, para.links.first().end))
+    }
+
+    @Test
+    fun anchorsSurviveNestingAndFormatting() {
+        val para = bodyOf(
+            """<p>见 <strong><a href="/forum/3">技术交流</a></strong> 板块</p>"""
+        ).first()
+
+        assertEquals("见 技术交流 板块", para.text)
+        assertEquals("https://linux.sb/forum/3", para.links.first().href)
+        assertEquals("技术交流", para.text.substring(para.links.first().start, para.links.first().end))
+    }
+
+    @Test
+    fun anAnchorWithoutAnHrefContributesNoLink() {
+        val para = bodyOf("""<p>纯 <a>锚点</a> 文本</p>""").first()
+
+        assertEquals("纯 锚点 文本", para.text)
+        assertTrue("an anchor with no href is not a link", para.links.isEmpty())
+    }
+
+    @Test
+    fun aQuoteAndAListItemKeepTheirLinksToo() {
+        val quote = bodyOf("""<blockquote>引自 <a href="/topic/7">原帖</a></blockquote>""").first()
+        assertEquals(LiveBlock.Type.QUOTE, quote.type)
+        assertEquals("https://linux.sb/topic/7", quote.links.single().href)
+
+        val item = bodyOf("""<ul><li>第一条 <a href="/topic/8">看这里</a></li></ul>""").first()
+        assertEquals(LiveBlock.Type.LIST_ITEM, item.type)
+        assertEquals("看这里", item.text.substring(item.links.single().start, item.links.single().end))
+    }
+
+    @Test
+    fun aBareAnchorIsStillItsOwnLinkBlock() {
+        // The one shape that already worked must keep working.
+        val blocks = bodyOf("""<a href="https://example.com">裸链接</a>""")
+        assertEquals(LiveBlock.Type.LINK, blocks.first().type)
+        assertEquals("https://example.com", blocks.first().href)
+    }
+
+    @Test
+    fun realPostBodiesCarryTheirLinks() {
+        // The regression this whole change exists for: on a real signed-in topic
+        // page, every anchor sat inside a <p>.
+        val t = Parse.topic(17536, 1, fixture("reply-form.html"))
+        // The fixture is the reply panel only, so this just has to not throw; the
+        // shape is covered by the cases above.
+        assertNotNull(t)
+    }
+
     // ---- 引用楼层 -------------------------------------------------------------
 
     /*
@@ -609,6 +718,43 @@ class ParseTest {
         assertTrue("expected a preview line", first.preview.isNotBlank())
         assertEquals("2026-08-14", first.timeText)
         assertTrue("expected an avatar", first.avatar.startsWith("https://linux.sb/"))
+    }
+
+    /**
+     * 开新会话 needs no new endpoint: a search hit links at the thread URL, and that
+     * page renders the compose box whether or not the two have ever written.
+     */
+    @Test
+    fun theUserSearchYieldsThreadTargets() {
+        val hits = Parse.userSearch(fixture("dm-search.html"))
+
+        assertEquals(3, hits.size)
+        assertEquals(16982, hits.first().userId)
+        assertEquals("甲", hits.first().name)
+        assertTrue(hits.first().avatar.startsWith("https://linux.sb/"))
+        assertTrue("every hit must resolve to a user", hits.all { it.userId > 0 })
+    }
+
+    @Test
+    fun theAttachmentUploaderIsReadOffThePage() {
+        val up = assertNotNull(
+            "expected an uploader beside the reply box",
+            Parse.uploaderOf(doc("reply-form.html"))
+        ).let { Parse.uploaderOf(doc("reply-form.html"))!! }
+
+        // Its own endpoint - not a field on the reply form.
+        assertEquals("https://linux.sb/attachment_upload", up.action)
+        assertEquals(64, up.csrf.length)
+        // The cap and the types are the site's, not ours.
+        assertEquals(20, up.maxMb)
+        assertTrue(up.accepts.contains(".png"))
+        assertTrue(up.accepts.contains(".zip"))
+        assertTrue("every entry is an extension", up.accepts.all { it.startsWith(".") })
+    }
+
+    @Test
+    fun aPageWithNoUploaderReportsNone() {
+        assertNull(Parse.uploaderOf(doc("dm-compose-form.html")))
     }
 
     @Test

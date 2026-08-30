@@ -97,9 +97,21 @@ data class LiveBlock(
     val type: Type,
     val text: String = "",
     val src: String = "",
-    val href: String = ""
+    val href: String = "",
+    /**
+     * Links inside [text], as ranges into it.
+     *
+     * A post body is almost always `<p>看看 <a href="…">这个</a></p>` - the anchor is
+     * nested, not a block of its own. Flattening the paragraph to a string threw the
+     * href away at parse time, which is why every in-post link was dead text. These
+     * carry it through to the renderer instead.
+     */
+    val links: List<Link> = emptyList()
 ) {
     enum class Type { PARA, HEADING, QUOTE, CODE, IMAGE, LIST_ITEM, RULE, LINK }
+
+    /** One anchor inside a block's text: `text.substring(start, end)` is its label. */
+    data class Link(val start: Int, val end: Int, val href: String)
 }
 
 /** A loaded topic page. */

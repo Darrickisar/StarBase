@@ -4,7 +4,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import okhttp3.FormBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import StarBase.Android.Forum.data.Board
@@ -244,6 +246,26 @@ object Api {
         Parse.conversations(html)
     }
 
+    /**
+     * Finds people to start a conversation with.
+     *
+     * The site's own 私信 page searches by GET, and every hit links at the thread
+     * URL - so there is no "create conversation" call to make: opening the thread
+     * for someone you have never written to is the new conversation.
+     */
+    suspend fun findUsers(query: String): List<Parse.UserHit> = io {
+        val q = query.trim()
+        if (q.isBlank()) return@io emptyList()
+        val url = "${Site.BASE}/index.php?a=direct_messages&q=" +
+            java.net.URLEncoder.encode(q, "UTF-8")
+        val html = Net.getText(url)
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("请登录后搜索用户", SiteException.Kind.AUTH)
+        }
+        Parse.userSearch(html)
+    }
+
     /** One private-message thread, keyed by the other person's user id. */
     suspend fun thread(partnerId: Int): Parse.Thread = io {
         val html = Net.getText(Site.conversation(partnerId))
@@ -297,6 +319,80 @@ object Api {
 
         val text = Parse.quotePrefix(quoting) + body.trim()
         submit(form, mapOf(field to text), "回复失败")
+    }
+
+    /**
+     * Uploads one attachment and returns the markdown that references it.
+     *
+     * Attachments are not a field on the reply or topic form - they are their own
+     * endpoint, and the site's own script posts the file, takes `markdown` out of
+     * the answer and appends that to the textarea. So this does the same: the
+     * caller puts the returned string in the body it is about to submit.
+     *
+     * [uploader] carries the endpoint and the size cap read off the page, so the
+     * limit is the site's rather than one written down here.
+     */
+    suspend fun uploadAttachment(
+        uploader: Parse.Uploader,
+        fileName: String,
+        mediaType: String,
+        bytes: ByteArray
+    ): String = io {
+        val capBytes = uploader.maxMb * 1024L * 1024L
+        if (uploader.maxMb > 0 && bytes.size > capBytes) {
+            throw SiteException(
+                "附件超过 ${uploader.maxMb} MB，站点不收",
+                SiteException.Kind.SERVER
+            )
+        }
+        if (uploader.accepts.isNotEmpty()) {
+            val ext = fileName.substringAfterLast('.', "").lowercase()
+            if (ext.isBlank() || uploader.accepts.none { it.equals(".$ext", true) }) {
+                throw SiteException(
+                    "站点只收 ${uploader.accepts.joinToString(" ")}",
+                    SiteException.Kind.SERVER
+                )
+            }
+        }
+
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("_csrf", uploader.csrf)
+            .addFormDataPart(
+                "attachment",
+                fileName,
+                bytes.toRequestBody(mediaType.toMediaTypeOrNull())
+            )
+            .build()
+
+        val raw = Net.postBody(uploader.action, body).trim()
+        if (!raw.startsWith("{")) {
+            Parse.refusal(raw)?.let { throw it }
+            throw SiteException("上传失败：站点没有按预期回应", SiteException.Kind.PARSE)
+        }
+        val json = try {
+            JSONObject(raw)
+        } catch (e: Exception) {
+            throw SiteException("上传失败：无法读取站点的回应", SiteException.Kind.PARSE)
+        }
+        if (!json.optBoolean("ok", json.optInt("ok", 0) == 1)) {
+            throw SiteException(
+                json.optString("message").ifBlank { "上传失败" },
+                SiteException.Kind.SERVER
+            )
+        }
+        json.optString("markdown").ifBlank {
+            throw SiteException("站点没有返回附件引用", SiteException.Kind.PARSE)
+        }
+    }
+
+    /** The attachment uploader on a topic page's reply form, or null when absent. */
+    suspend fun replyUploader(topicId: Int): Parse.Uploader? = io {
+        Parse.uploaderOf(Jsoup.parse(Net.getText(Site.topic(topicId)), Site.BASE))
+    }
+
+    /** The attachment uploader on the 发帖 form. */
+    suspend fun newTopicUploader(): Parse.Uploader? = io {
+        Parse.uploaderOf(Jsoup.parse(Net.getText(Site.NEW_TOPIC), Site.NEW_TOPIC))
     }
 
     /**

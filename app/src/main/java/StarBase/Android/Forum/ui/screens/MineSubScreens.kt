@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,10 +32,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.DirectMessage
@@ -205,6 +209,59 @@ class MessagesViewModel : ViewModel() {
     var refreshing by mutableStateOf(false)
         private set
 
+    /** 开新会话: what was typed, and who it found. */
+    var query by mutableStateOf("")
+        private set
+    var hits by mutableStateOf<List<Parse.UserHit>>(emptyList())
+        private set
+    var searching by mutableStateOf(false)
+        private set
+    var searchNote by mutableStateOf("")
+        private set
+
+    private var searchInFlight = false
+
+    fun updateQuery(value: String) {
+        query = value
+        if (value.isBlank()) {
+            hits = emptyList()
+            searchNote = ""
+        }
+    }
+
+    /**
+     * Finds people to write to.
+     *
+     * There is no conversation to create: a hit's thread page is the conversation,
+     * empty until the first message. So this only has to find the user id.
+     */
+    fun search() {
+        val q = query.trim()
+        if (q.isBlank() || searchInFlight) return
+        searchInFlight = true
+        searching = true
+        searchNote = ""
+        viewModelScope.launch {
+            try {
+                val found = Api.findUsers(q)
+                hits = found
+                searchNote = if (found.isEmpty()) "没找到叫「$q」的用户" else ""
+            } catch (e: Throwable) {
+                hits = emptyList()
+                searchNote = e.message ?: "搜索失败"
+            } finally {
+                searching = false
+                searchInFlight = false
+            }
+        }
+    }
+
+    fun clearSearch() {
+        query = ""
+        hits = emptyList()
+        searchNote = ""
+    }
+
     private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS)
     private var inFlight = false
 
@@ -271,21 +328,29 @@ fun MessagesScreen(
                 onRefresh = { vm.load(force = true) }
             ) {
                 if (s.value.isEmpty()) {
-                    Column {
-                        EmptyPanel("还没有私信")
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            SmallAction(text = "在网页中打开", primary = false) {
-                                onOpenSite(Site.MESSAGES)
+                    // No conversations yet is exactly when 开新会话 matters, so the
+                    // finder comes first and the empty state sits under it.
+                    LazyColumn {
+                        item("find") { FindUserBar(vm = vm, onThread = onThread) }
+                        item("empty") {
+                            EmptyPanel("还没有私信", "搜个用户名就能开始")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                SmallAction(text = "在网页中打开", primary = false) {
+                                    onOpenSite(Site.MESSAGES)
+                                }
                             }
                         }
                     }
                 } else {
                     LazyColumn {
+                        item("find") {
+                            FindUserBar(vm = vm, onThread = onThread)
+                        }
                         itemsIndexed(s.value, key = { i, c -> "${c.id}-$i" }) { index, item ->
-                            if (index > 0) Hairline(startInset = 66)
+                            Hairline(startInset = 66)
                             ConversationRow(item) {
                                 // A thread is a screen of our own now, with its own
                                 // compose box - it no longer hands off to the site.
@@ -297,6 +362,106 @@ fun MessagesScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * 开新会话.
+ *
+ * Search for a username, tap the hit, and the thread opens - empty, with its compose
+ * box. That is all a new conversation is on this site, so there is no separate
+ * "start" step to build.
+ */
+@Composable
+private fun FindUserBar(vm: MessagesViewModel, onThread: (Int) -> Unit) {
+    val tokens = LocalTokens.current
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = SbMetrics.pagePadding, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .liquidGlass(
+                        shape = RoundedCornerShape(SbRadius.field),
+                        level = GlassLevel.MEDIUM,
+                        refract = false
+                    )
+                    .padding(horizontal = 13.dp, vertical = 11.dp)
+            ) {
+                if (vm.query.isEmpty()) {
+                    Text(
+                        text = "搜用户名，开始新会话",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = tokens.textTertiary
+                    )
+                }
+                BasicTextField(
+                    value = vm.query,
+                    onValueChange = vm::updateQuery,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = tokens.textPrimary),
+                    cursorBrush = SolidColor(tokens.accentWarm),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        keyboard?.hide()
+                        vm.search()
+                    }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Spacer(Modifier.width(9.dp))
+            GlassButton(
+                text = if (vm.searching) "搜索中" else "搜索",
+                onClick = {
+                    keyboard?.hide()
+                    vm.search()
+                },
+                enabled = vm.query.isNotBlank() && !vm.searching,
+                modifier = Modifier.width(72.dp)
+            )
+        }
+
+        if (vm.searchNote.isNotBlank()) {
+            Text(
+                text = vm.searchNote,
+                style = MaterialTheme.typography.labelMedium,
+                color = tokens.textTertiary,
+                modifier = Modifier.padding(start = SbMetrics.pagePadding, bottom = 8.dp)
+            )
+        }
+
+        vm.hits.forEach { hit ->
+            Hairline(startInset = 66)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        vm.clearSearch()
+                        onThread(hit.userId)
+                    }
+                    .padding(horizontal = SbMetrics.pagePadding, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                UserAvatar(name = hit.name, url = hit.avatar, size = 34.dp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = hit.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = tokens.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                MetaText("开始对话")
+            }
+        }
+        if (vm.hits.isNotEmpty()) Gap(6)
     }
 }
 
@@ -318,6 +483,9 @@ class ThreadViewModel : ViewModel() {
     private val fresh = Freshness(windowMs = 45_000L)
     private var inFlight = false
 
+    /** Same hazard as 帖子详情: see [TopicViewModel]'s own loadJob. */
+    private var loadJob: Job? = null
+
     val ageSeconds: Long get() = fresh.ageSeconds
 
     fun open(id: Int) {
@@ -325,7 +493,11 @@ class ThreadViewModel : ViewModel() {
             if (fresh.stale) load()
             return
         }
+        loadJob?.cancel()
+        loadJob = null
+        inFlight = false
         partnerId = id
+        notice = ""
         fresh.invalidate()
         load(initial = true)
     }
@@ -337,16 +509,22 @@ class ThreadViewModel : ViewModel() {
     fun load(initial: Boolean = false) {
         if (inFlight || partnerId == 0) return
         inFlight = true
-        viewModelScope.launch {
+        val requested = partnerId
+        loadJob = viewModelScope.launch {
             if (initial) state = Load.Loading else refreshing = true
             try {
-                state = Load.Ready(Api.thread(partnerId))
+                val thread = Api.thread(requested)
+                if (requested != partnerId) return@launch
+                state = Load.Ready(thread)
                 fresh.mark()
             } catch (e: Throwable) {
+                if (requested != partnerId) return@launch
                 if (state !is Load.Ready) state = failureOf(e) else notice = e.message.orEmpty()
             } finally {
-                refreshing = false
-                inFlight = false
+                if (requested == partnerId) {
+                    refreshing = false
+                    inFlight = false
+                }
             }
         }
     }
@@ -789,6 +967,9 @@ class ProfileViewModel : ViewModel() {
     private val fresh = Freshness()
     private var inFlight = false
 
+    /** Same hazard as 帖子详情: see [TopicViewModel]'s own loadJob. */
+    private var loadJob: Job? = null
+
     val ageSeconds: Long get() = fresh.ageSeconds
 
     /**
@@ -800,22 +981,36 @@ class ProfileViewModel : ViewModel() {
         val same = id == userId && want == tab
         val loaded = state is Load.Ready
         if (same && loaded && !force && !fresh.stale) return
+
+        // Moving to another profile or tab cancels the one being left. Without
+        // this the `inFlight` guard below swallowed the new request and the old
+        // profile's answer published itself as the new one's.
+        if (!same) {
+            loadJob?.cancel()
+            loadJob = null
+            inFlight = false
+        }
         if (inFlight) return
         inFlight = true
         if (!same) fresh.invalidate()
         userId = id
         tab = want
-        viewModelScope.launch {
+        loadJob = viewModelScope.launch {
             // Switching user or tab blanks the screen; re-reading does not.
             if (!same || !loaded) state = Load.Loading else refreshing = true
             try {
-                state = Load.Ready(Api.profile(id, want))
+                val profile = Api.profile(id, want)
+                if (id != userId || want != tab) return@launch
+                state = Load.Ready(profile)
                 fresh.mark()
             } catch (e: Throwable) {
+                if (id != userId || want != tab) return@launch
                 if (state !is Load.Ready) state = failureOf(e)
             } finally {
-                refreshing = false
-                inFlight = false
+                if (id == userId && want == tab) {
+                    refreshing = false
+                    inFlight = false
+                }
             }
         }
     }

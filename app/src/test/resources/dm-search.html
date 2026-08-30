@@ -1,0 +1,18 @@
+<!doctype html>
+<!--
+  GET /index.php?a=direct_messages&q=<name> - the 私信 page's own user search.
+  Structure verbatim; the display names are real people's, so those are replaced.
+
+  This is what makes 开新会话 work at all. There is no "create conversation" call:
+  every hit links straight at /direct_messages/<uid>, which renders the same thread
+  page an existing conversation does, compose box included. A new conversation is
+  just an empty one.
+
+  The uid is both in the href and on the avatar as data-online-user-id.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>私信用户搜索 - LINUX SB</title></head>
+<body>
+<div class="direct-messages-search-head">找到 3 个用户</div><a class="direct-messages-search-result" href="/direct_messages/16982"><span class="direct-messages-list-avatar" data-online-user-id="16982"><img class="avatar-img" src="/app/avatars/bottts-neutral_38.svg" alt="联系人" loading="lazy"></span><span><strong>甲</strong><small>开始对话</small></span></a><a class="direct-messages-search-result" href="/direct_messages/1048"><span class="direct-messages-list-avatar" data-online-user-id="1048"><img class="avatar-img" src="/app/upload/avatar_upload/d2/1048.jpg?v=1786746675007271" alt="联系人" loading="lazy"></span><span><strong>乙</strong><small>开始对话</small></span></a><a class="direct-messages-search-result" href="/direct_messages/5727"><span class="direct-messages-list-avatar" data-online-user-id="5727"><img class="avatar-img" src="/app/upload/avatar_upload/1c/5727.jpg?v=1786177326004408" alt="联系人" loading="lazy"></span><span><strong>丙</strong><small>开始对话</small></span></a>
+</body>
+</html>

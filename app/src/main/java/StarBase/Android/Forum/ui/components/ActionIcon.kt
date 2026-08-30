@@ -28,7 +28,7 @@ import androidx.compose.ui.unit.dp
  * be readable at 15dp where a stroke-weight change is not.
  */
 
-enum class ActionGlyph { HEART, QUOTE, COIN }
+enum class ActionGlyph { HEART, QUOTE, COIN, CLIP }
 
 private const val VIEW = 24f
 
@@ -47,8 +47,40 @@ fun ActionIcon(
             ActionGlyph.HEART -> heart(tint, u, stroke, filled)
             ActionGlyph.QUOTE -> quote(tint, u, stroke)
             ActionGlyph.COIN -> coin(tint, u, stroke, filled)
+            ActionGlyph.CLIP -> clip(tint, u, stroke)
         }
     }
+}
+
+/** 附件: a paperclip - one open loop, which stays legible at 15dp. */
+private fun DrawScope.clip(tint: Color, u: Float, stroke: Stroke) {
+    drawPath(
+        Path().apply {
+            // Down the long side, round the bottom, back up the short side.
+            moveTo(16.4f * u, 8.2f * u)
+            lineTo(8.6f * u, 16f * u)
+            cubicTo(
+                6.9f * u, 17.7f * u,
+                4.4f * u, 15.2f * u,
+                6.1f * u, 13.5f * u
+            )
+            lineTo(14.6f * u, 5f * u)
+            cubicTo(
+                17.1f * u, 2.5f * u,
+                21f * u, 6.4f * u,
+                18.5f * u, 8.9f * u
+            )
+            lineTo(10f * u, 17.4f * u)
+            cubicTo(
+                6.6f * u, 20.8f * u,
+                1.6f * u, 15.8f * u,
+                5f * u, 12.4f * u
+            )
+            lineTo(11.8f * u, 5.6f * u)
+        },
+        color = tint,
+        style = stroke
+    )
 }
 
 /**

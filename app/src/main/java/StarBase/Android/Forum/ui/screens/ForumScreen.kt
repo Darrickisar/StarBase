@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.ForumRef
@@ -226,6 +227,9 @@ class ForumViewModel : ViewModel() {
     /** One request at a time: the resume hook and a pull can arrive together. */
     private var inFlight = false
 
+    /** Same hazard as 帖子详情: see [TopicViewModel]'s own loadJob. */
+    private var loadJob: Job? = null
+
     val hasMore: Boolean get() = page < lastPage
     val ageSeconds: Long get() = fresh.ageSeconds
 
@@ -239,7 +243,16 @@ class ForumViewModel : ViewModel() {
             if (fresh.stale) reload(initial = false)
             return
         }
+        // Same hazard as 帖子详情: the board we are leaving must not publish its
+        // answer here, and its request must not eat this one via the guard.
+        loadJob?.cancel()
+        loadJob = null
+        inFlight = false
+
         forumId = id
+        rows.clear()
+        page = 1
+        lastPage = 1
         sort = ForumSort.DEFAULT
         fresh.invalidate()
         reload(initial = true)
@@ -260,21 +273,27 @@ class ForumViewModel : ViewModel() {
     private fun reload(initial: Boolean) {
         if (inFlight) return
         inFlight = true
-        viewModelScope.launch {
+        // Which board this request is for; see [ForumViewModel.open].
+        val requested = forumId
+        loadJob = viewModelScope.launch {
             if (initial) state = Load.Loading else refreshing = true
             page = 1
             try {
-                val fp = Api.forum(forumId, 1, sort.key)
+                val fp = Api.forum(requested, 1, sort.key)
+                if (requested != forumId) return@launch
                 rows.clear()
                 rows += fp.topics
                 lastPage = fp.lastPage
                 state = Load.Ready(fp)
                 fresh.mark()
             } catch (e: Throwable) {
+                if (requested != forumId) return@launch
                 if (state !is Load.Ready) state = failureOf(e)
             } finally {
-                refreshing = false
-                inFlight = false
+                if (requested == forumId) {
+                    refreshing = false
+                    inFlight = false
+                }
             }
         }
     }
@@ -282,9 +301,13 @@ class ForumViewModel : ViewModel() {
     fun loadMore() {
         if (loadingMore || !hasMore) return
         loadingMore = true
+        val requested = forumId
         viewModelScope.launch {
             try {
-                val next = Api.forum(forumId, page + 1, sort.key)
+                val next = Api.forum(requested, page + 1, sort.key)
+                // A page of the board we were reading must not be appended to the
+                // one we are reading now.
+                if (requested != forumId) return@launch
                 val known = rows.mapTo(HashSet()) { it.id }
                 rows += next.topics.filter { it.id !in known }
                 page += 1
@@ -292,7 +315,7 @@ class ForumViewModel : ViewModel() {
             } catch (e: Throwable) {
                 // keep what is on screen
             } finally {
-                loadingMore = false
+                if (requested == forumId) loadingMore = false
             }
         }
     }

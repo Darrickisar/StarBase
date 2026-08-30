@@ -40,6 +40,7 @@ import StarBase.Android.Forum.ui.LoadingMark
 import StarBase.Android.Forum.ui.failureOf
 import StarBase.Android.Forum.ui.components.SectionHeader
 import StarBase.Android.Forum.ui.components.SegmentPill
+import StarBase.Android.Forum.ui.components.rememberFilePicker
 import StarBase.Android.Forum.ui.glass.GlassButton
 import StarBase.Android.Forum.ui.glass.GlassLevel
 import StarBase.Android.Forum.ui.glass.liquidGlass
@@ -61,6 +62,8 @@ class NewTopicViewModel : ViewModel() {
     var boards by mutableStateOf<Load<List<Pair<Int, String>>>>(Load.Loading)
         private set
     var posting by mutableStateOf(false)
+        private set
+    var uploading by mutableStateOf(false)
         private set
     var notice by mutableStateOf("")
         private set
@@ -114,7 +117,31 @@ class NewTopicViewModel : ViewModel() {
         }
     }
 
+    /** Uploads a file and hands back the markdown to put in the body. */
+    fun attach(
+        fileName: String,
+        mediaType: String,
+        bytes: ByteArray,
+        onMarkdown: (String) -> Unit
+    ) {
+        if (uploading) return
+        uploading = true
+        viewModelScope.launch {
+            try {
+                val uploader = Api.newTopicUploader()
+                    ?: throw IllegalStateException("发帖页不支持附件")
+                onMarkdown(Api.uploadAttachment(uploader, fileName, mediaType, bytes))
+                notice = "附件已插入正文"
+            } catch (e: Throwable) {
+                notice = e.message ?: "附件上传失败"
+            } finally {
+                uploading = false
+            }
+        }
+    }
+
     fun clearNotice() { notice = "" }
+    fun showNotice(text: String) { notice = text }
     fun browserPostHandled() { browserPost = "" }
 }
 
@@ -135,6 +162,21 @@ fun NewTopicScreen(
             onOpenSite(url)
             vm.browserPostHandled()
         }
+    }
+
+    var pendingInsert by remember { mutableStateOf<((String) -> Unit)?>(null) }
+    val pickFile = rememberFilePicker(maxMb = 20) { picked ->
+        val insert = pendingInsert
+        pendingInsert = null
+        picked
+            .onSuccess { file ->
+                vm.attach(file.name, file.mediaType, file.bytes) { md -> insert?.invoke(md) }
+            }
+            .onFailure { vm.showNotice(it.message ?: "读不到这个文件") }
+    }
+    val onAttach: ((String) -> Unit) -> Unit = { insert ->
+        pendingInsert = insert
+        pickFile()
     }
 
     var title by remember { mutableStateOf("") }
@@ -187,7 +229,29 @@ fun NewTopicScreen(
                         )
 
                         Gap(18)
-                        SectionHeader(title = "正文")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = SbMetrics.pagePadding),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                SectionHeader(title = "正文")
+                            }
+                            // The upload answers with markdown, so attaching is
+                            // appending - the body field stays the whole truth.
+                            GlassButton(
+                                text = if (vm.uploading) "上传中" else "附件",
+                                onClick = {
+                                    onAttach { markdown ->
+                                        body = if (body.isBlank()) markdown else "$body\n$markdown"
+                                    }
+                                },
+                                enabled = !vm.uploading && !vm.posting,
+                                primary = false,
+                                compact = true
+                            )
+                        }
                         Gap(8)
                         Field(
                             value = body,

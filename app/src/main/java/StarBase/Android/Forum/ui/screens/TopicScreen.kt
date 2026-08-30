@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.TopicDetail
@@ -58,6 +59,7 @@ import StarBase.Android.Forum.ui.components.MetaRow
 import StarBase.Android.Forum.ui.components.ActionGlyph
 import StarBase.Android.Forum.ui.components.ActionIcon
 import StarBase.Android.Forum.ui.components.MetaText
+import StarBase.Android.Forum.ui.components.rememberFilePicker
 import StarBase.Android.Forum.ui.components.PostBody
 import StarBase.Android.Forum.ui.components.UserAvatar
 import StarBase.Android.Forum.ui.components.tierColor
@@ -89,6 +91,8 @@ class TopicViewModel : ViewModel() {
     var loadingMore by mutableStateOf(false)
         private set
     var posting by mutableStateOf(false)
+        private set
+    var uploading by mutableStateOf(false)
         private set
     var notice by mutableStateOf("")
         private set
@@ -129,6 +133,16 @@ class TopicViewModel : ViewModel() {
     /** One request at a time; a pull and the resume hook can coincide. */
     private var inFlight = false
 
+    /**
+     * The load in flight, so opening another topic can cancel it.
+     *
+     * This ViewModel is shared by every topic, and `topicId` is just a field. Two
+     * things went wrong without this: [open] hit the `inFlight` guard and returned
+     * without ever fetching the new topic, and the old topic's response then
+     * published itself as the new topic's content - tap A, wait, tap B, read A.
+     */
+    private var loadJob: Job? = null
+
     val hasMore: Boolean get() = page < lastPage
     val ageSeconds: Long get() = fresh.ageSeconds
 
@@ -142,7 +156,26 @@ class TopicViewModel : ViewModel() {
             if (fresh.stale) load(initial = false)
             return
         }
+
+        // Drop whatever the topic we are leaving still has in flight. Without this
+        // the `inFlight` guard in [load] swallows this topic's request and the old
+        // topic's answer lands here instead.
+        loadJob?.cancel()
+        loadJob = null
+        inFlight = false
+
         topicId = id
+        // Everything below belongs to the topic we just left, and a slow fetch
+        // should show an empty thread rather than the previous one's comments.
+        comments.clear()
+        page = 1
+        lastPage = 1
+        quoting = null
+        likeTarget = null
+        topicPresets = emptyList()
+        topicDonateInfo = ""
+        notice = ""
+
         fresh.invalidate()
         load(initial = true)
     }
@@ -156,22 +189,32 @@ class TopicViewModel : ViewModel() {
     private fun load(initial: Boolean) {
         if (inFlight) return
         inFlight = true
-        viewModelScope.launch {
+        // Which topic this request is for. Checked before every write, because by
+        // the time the answer arrives the reader may be on another topic.
+        val requested = topicId
+        loadJob = viewModelScope.launch {
             if (initial) state = Load.Loading else refreshing = true
             page = 1
             try {
-                val detail = Api.topic(topicId, 1)
+                val detail = Api.topic(requested, 1)
+                if (requested != topicId) return@launch
                 comments.clear()
                 comments += detail.comments
                 lastPage = detail.lastPage
                 state = Load.Ready(detail)
                 fresh.mark()
             } catch (e: Throwable) {
+                if (requested != topicId) return@launch
                 if (state !is Load.Ready) state = failureOf(e)
                 else notice = (e.message ?: "刷新失败")
             } finally {
-                refreshing = false
-                inFlight = false
+                // Only the request that is still current may clear these; a
+                // cancelled one would otherwise unlock the guard under its
+                // replacement and let two loads run at once.
+                if (requested == topicId) {
+                    refreshing = false
+                    inFlight = false
+                }
             }
         }
     }
@@ -179,17 +222,21 @@ class TopicViewModel : ViewModel() {
     fun loadMore() {
         if (loadingMore || !hasMore) return
         loadingMore = true
+        val requested = topicId
         viewModelScope.launch {
             try {
-                val next = Api.topic(topicId, page + 1)
+                val next = Api.topic(requested, page + 1)
+                // A page of the topic we were reading must not be appended to the
+                // one we are reading now.
+                if (requested != topicId) return@launch
                 val known = comments.mapTo(HashSet()) { it.id }
                 comments += next.comments.filter { it.id !in known }
                 page += 1
                 lastPage = maxOf(lastPage, next.lastPage)
             } catch (e: Throwable) {
-                notice = e.message ?: "加载更多失败"
+                if (requested == topicId) notice = e.message ?: "加载更多失败"
             } finally {
-                loadingMore = false
+                if (requested == topicId) loadingMore = false
             }
         }
     }
@@ -222,6 +269,34 @@ class TopicViewModel : ViewModel() {
                 notice = e.message ?: "回复失败"
             } finally {
                 posting = false
+            }
+        }
+    }
+
+    /**
+     * Uploads a file and hands back the markdown to put in the reply.
+     *
+     * The uploader is read from the topic page each time rather than cached: it
+     * carries a `_csrf`, and a stale one is the usual way this fails.
+     */
+    fun attach(
+        fileName: String,
+        mediaType: String,
+        bytes: ByteArray,
+        onMarkdown: (String) -> Unit
+    ) {
+        if (uploading) return
+        uploading = true
+        viewModelScope.launch {
+            try {
+                val uploader = Api.replyUploader(topicId)
+                    ?: throw IllegalStateException("这个帖子不支持附件")
+                onMarkdown(Api.uploadAttachment(uploader, fileName, mediaType, bytes))
+                notice = "附件已插入正文"
+            } catch (e: Throwable) {
+                notice = e.message ?: "附件上传失败"
+            } finally {
+                uploading = false
             }
         }
     }
@@ -312,11 +387,13 @@ class TopicViewModel : ViewModel() {
     private suspend fun loadPage(target: Int) {
         refreshing = true
         inFlight = true
+        val requested = topicId
         try {
-            var detail = Api.topic(topicId, target)
+            var detail = Api.topic(requested, target)
             if (detail.lastPage > target) {
-                detail = Api.topic(topicId, detail.lastPage)
+                detail = Api.topic(requested, detail.lastPage)
             }
+            if (requested != topicId) return
             comments.clear()
             comments += detail.comments
             page = detail.page
@@ -324,14 +401,19 @@ class TopicViewModel : ViewModel() {
             state = Load.Ready(detail)
             fresh.mark()
         } catch (e: Throwable) {
-            notice = e.message ?: "刷新失败"
+            if (requested == topicId) notice = e.message ?: "刷新失败"
         } finally {
-            refreshing = false
-            inFlight = false
+            if (requested == topicId) {
+                refreshing = false
+                inFlight = false
+            }
         }
     }
 
     fun clearNotice() { notice = "" }
+
+    /** For failures the screen sees before the ViewModel is involved. */
+    fun showNotice(text: String) { notice = text }
 }
 
 @Composable
@@ -351,6 +433,23 @@ fun TopicScreen(
 ) {
     LaunchedEffect(topicId) { vm.open(topicId) }
     OnReturnToForeground(topicId) { vm.refreshIfStale() }
+
+    // 附件: the picker has to be remembered at the screen level, and what it yields
+    // is markdown the reply bar appends to whatever is typed.
+    var pendingInsert by remember { mutableStateOf<((String) -> Unit)?>(null) }
+    val pickFile = rememberFilePicker(maxMb = 20) { picked ->
+        val insert = pendingInsert
+        pendingInsert = null
+        picked
+            .onSuccess { file ->
+                vm.attach(file.name, file.mediaType, file.bytes) { md -> insert?.invoke(md) }
+            }
+            .onFailure { vm.showNotice(it.message ?: "读不到这个文件") }
+    }
+    val onAttach: ((String) -> Unit) -> Unit = { insert ->
+        pendingInsert = insert
+        pickFile()
+    }
 
     // A reply the site will only take from a browser: hand it the page. The
     // notice already says why, so this opens without a second prompt.
@@ -422,8 +521,10 @@ fun TopicScreen(
                 } else if (s.value.canReply || signedIn) {
                     ReplyBar(
                         posting = vm.posting,
+                        uploading = vm.uploading,
                         quoting = vm.quoting,
                         onCancelQuote = { vm.quote(null) },
+                        onAttach = onAttach,
                         onSend = { text, done -> vm.reply(text) { done() } }
                     )
                 }
@@ -1036,14 +1137,16 @@ internal fun NoticeBar(text: String, onDismiss: () -> Unit) {
 @Composable
 private fun ReplyBar(
     posting: Boolean,
+    uploading: Boolean,
     quoting: Post?,
     onCancelQuote: () -> Unit,
+    onAttach: ((String) -> Unit) -> Unit,
     onSend: (String, () -> Unit) -> Unit
 ) {
     val tokens = LocalTokens.current
     var text by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
-    val enabled = text.isNotBlank() && !posting
+    val enabled = text.isNotBlank() && !posting && !uploading
 
     Column(modifier = Modifier.fillMaxWidth().imePadding()) {
         Hairline()
@@ -1107,9 +1210,26 @@ private fun ReplyBar(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            Spacer(Modifier.width(9.dp))
+            Spacer(Modifier.width(6.dp))
+            // The upload returns markdown; appending it is what "attaching" means
+            // here, so the text field stays the single source of the body.
+            IconAction(
+                glyph = ActionGlyph.CLIP,
+                onClick = {
+                    onAttach { markdown ->
+                        text = if (text.isBlank()) markdown else "$text\n$markdown"
+                    }
+                },
+                description = "添加附件",
+                enabled = !uploading && !posting
+            )
+            Spacer(Modifier.width(3.dp))
             GlassButton(
-                text = if (posting) "发送中" else "发送",
+                text = when {
+                    uploading -> "上传中"
+                    posting -> "发送中"
+                    else -> "发送"
+                },
                 onClick = {
                     keyboard?.hide()
                     onSend(text) { text = "" }

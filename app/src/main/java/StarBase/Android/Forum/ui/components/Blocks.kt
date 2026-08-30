@@ -18,9 +18,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -50,6 +57,60 @@ fun PostBody(
     }
 }
 
+/**
+ * A run of body text with its anchors live.
+ *
+ * The parser hands over the plain string plus ranges into it, so this only has to
+ * paint those ranges and route their taps. It is one [Text], not a row of pieces:
+ * a link has to wrap mid-sentence like any other word.
+ */
+@Composable
+private fun LinkedText(
+    block: LiveBlock,
+    style: TextStyle,
+    color: Color,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (block.links.isEmpty()) {
+        Text(text = block.text, style = style, color = color, modifier = modifier)
+        return
+    }
+
+    val tokens = LocalTokens.current
+    val linkStyle = SpanStyle(
+        color = tokens.accentGlow,
+        textDecoration = TextDecoration.Underline
+    )
+
+    val annotated = remember(block, tokens.accentGlow) {
+        buildAnnotatedString {
+            var cursor = 0
+            // Ranges arrive in document order; clamp anyway so a bad one cannot
+            // throw here - a post body is untrusted input.
+            for (link in block.links.sortedBy { it.start }) {
+                val start = link.start.coerceIn(0, block.text.length)
+                val end = link.end.coerceIn(start, block.text.length)
+                if (start < cursor) continue
+                append(block.text.substring(cursor, start))
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = link.href,
+                        styles = TextLinkStyles(style = linkStyle),
+                        linkInteractionListener = { onLinkClick(link.href) }
+                    )
+                ) {
+                    append(block.text.substring(start, end))
+                }
+                cursor = end
+            }
+            append(block.text.substring(cursor))
+        }
+    }
+
+    Text(text = annotated, style = style, color = color, modifier = modifier)
+}
+
 private fun gapBefore(block: LiveBlock) = when (block.type) {
     LiveBlock.Type.HEADING -> 16.dp
     LiveBlock.Type.IMAGE -> 12.dp
@@ -69,16 +130,18 @@ private fun BlockView(
     val tokens = LocalTokens.current
     when (block.type) {
         // §05: 13.5-14.5sp with a ~1.8 line height - bodyMedium is 14/25.
-        LiveBlock.Type.PARA -> Text(
-            text = block.text,
+        LiveBlock.Type.PARA -> LinkedText(
+            block = block,
             style = MaterialTheme.typography.bodyMedium,
-            color = tokens.textPrimary
+            color = tokens.textPrimary,
+            onLinkClick = onLinkClick
         )
 
-        LiveBlock.Type.HEADING -> Text(
-            text = block.text,
+        LiveBlock.Type.HEADING -> LinkedText(
+            block = block,
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-            color = tokens.textPrimary
+            color = tokens.textPrimary,
+            onLinkClick = onLinkClick
         )
 
         // IntrinsicSize.Min lets the accent bar match the wrapped text's height.
@@ -95,10 +158,11 @@ private fun BlockView(
                     .background(tokens.quoteBar)
             )
             Spacer(Modifier.width(10.dp))
-            Text(
-                text = block.text,
+            LinkedText(
+                block = block,
                 style = MaterialTheme.typography.bodyMedium,
                 color = tokens.textSecondary,
+                onLinkClick = onLinkClick,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -135,10 +199,11 @@ private fun BlockView(
                 color = tokens.accentWarm
             )
             Spacer(Modifier.width(8.dp))
-            Text(
-                text = block.text,
+            LinkedText(
+                block = block,
                 style = MaterialTheme.typography.bodyMedium,
                 color = tokens.textPrimary,
+                onLinkClick = onLinkClick,
                 modifier = Modifier.weight(1f)
             )
         }
