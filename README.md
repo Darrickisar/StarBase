@@ -36,8 +36,18 @@ App 内的登录页，不再把人踢回网页。
 | --- | --- | --- |
 | 回帖 | `/reply_edit` | `body` |
 | 发帖 | `/topic_edit`（表单无 action，发回自己） | `body` |
-| 点赞 | `/donate_reply_reaction` | 无，用 `donate_reaction_points` |
+| 评论点赞 | `/donate_reply_reaction` | 无，用 `donate_reaction_points` |
+| 主楼打赏 | `/donate`，要先 XHR 取 `/donate?topic_id=` 拿一次性 `request_key` | 无，用 `amount` |
 | 私信 | `/direct_messages/{对方uid}` | `content` |
+| 附件 | `/attachment_upload`，独立端点 | 无，`attachment` 是文件部分 |
+
+主楼和评论的点赞是**两套无关的机制**：评论的表单就在页面上，主楼页面上只有一个链接，真表单在
+`/donate?topic_id=` 的 JSON 里，且 `request_key` 一次性，不能缓存。
+
+附件也不是表单字段：POST 文件到 `/attachment_upload`，响应里的 `markdown` 才是要插进正文的东西。
+
+开新会话不需要额外接口——用户搜索的每条结果都直接指向 `/direct_messages/{uid}`，那个页面对从没
+聊过的人一样渲染发送框，空会话就是新会话。
 
 引用楼层不是表单字段：站点的回帖处理器从正文文本里认 `@某人 #12`，所以 `Parse.quotePrefix`
 负责写、解析层负责读，两个方向有往返测试互锁。
@@ -83,7 +93,7 @@ _grab.ps1                    抓登录态页面（写操作的表单只在登录
 _tools/mkfixtures.py         把抓下来的页面脱敏成 fixture
 ```
 
-约 12,100 行 Kotlin。
+约 13,200 行 Kotlin。
 
 ### 抓登录态页面
 
@@ -124,7 +134,7 @@ sdk.dir=/path/to/Android/sdk
 ```bash
 gradle :app:assembleDebug          # 调试包
 gradle :app:testDebugUnitTest      # 单元测试
-gradle :app:assembleRelease        # 发布包，输出 StarBase-release.apk
+gradle :app:assembleRelease        # 发布包，输出 app/build/outputs/apk/release/StarBase.apk
 ```
 
 release 走 minify + 资源压缩。签名读仓库根目录的 `keystore.properties`：
@@ -144,7 +154,7 @@ keyPassword=...
 gradle :app:testDebugUnitTest
 ```
 
-48 个用例，全部打在 `Parse.kt` 上——解析层是唯一会因为站点改版而静默失效的地方。fixture 是从
+61 个用例，全部打在 `Parse.kt` 上——解析层是唯一会因为站点改版而静默失效的地方。fixture 是从
 linux.sb 真实抓下来的页面（`app/src/test/resources/*.html`，其中的一次性 CSRF / 验证码 token
 已替换为占位值，真人昵称和私信正文也换掉了）。站点结构变了就先加一个 fixture 再改解析，不要
 只改解析。
@@ -181,9 +191,7 @@ App 界面内的品牌位不用位图，`ui/components/StarMark.kt` 用 Canvas �
 - 登录必须走 WebView：站点有 Cloudflare、`_csrf`、算术验证码、PoW 和蜜罐字段，无法用纯 HTTP 复现。
 - 发帖只能发普通帖。抽奖帖和发卡帖的表单字段多一大截（奖品清单、开奖时间、卡密、面额），
   没做进去。
-- 回帖不能带附件。附件是独立的上传端点（`/attachment_upload`），要先上传再把返回的引用插进
-  正文，这一步没做。
-- 私信只能在已有会话里发。要开新会话得先在网页上找人。
+- 附件一次传一个。站点网页版能多选排队上传，App 没做队列。
 - 搜索必须登录，这是站点的限制。
 - 没有 Gradle wrapper（见上）。
 
