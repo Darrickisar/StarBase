@@ -7,6 +7,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.LiveBlock
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.net.Parse
@@ -1399,6 +1400,60 @@ class ParseTest {
         val mark = Parse.topic(17536, 1, fixture("topic-signed.html")).favorite
         assertNotNull(mark)
         assertEquals("收藏", mark!!.label)
+    }
+
+    /**
+     * The 收藏 POST answers with a page, and both guards on that answer path run
+     * against it. Either firing on an ordinary topic page would turn every
+     * successful 收藏 into an error message.
+     */
+    @Test
+    fun aTopicPageIsNeitherARefusalNorALoginPage() {
+        val page = fixture("topic-signed.html")
+        assertNull(Parse.refusal(page))
+        assertFalse(Parse.isLoginPage(page))
+    }
+
+    /**
+     * 收藏 lands on the website, so "did it land" is decided by comparing the
+     * site's button before and after - not by classifying the answer alone.
+     * These are the four shapes that comparison has to get right.
+     */
+    @Test
+    fun favoriteChangeTrustsTheComparisonOverTheClassifier() {
+        val off = FavoriteMark("收藏", on = false)
+        val on = FavoriteMark("已收藏", on = true)
+
+        // The ordinary case: the site's own two states, read correctly.
+        Parse.favoriteChange(off, on).let {
+            assertTrue(it.changed)
+            assertTrue(it.mark.on)
+        }
+        Parse.favoriteChange(on, off).let {
+            assertTrue(it.changed)
+            assertFalse(it.mark.on)
+        }
+
+        // The site reworded the button, but our reading of both came out "off".
+        // The tap plainly did something, so the state is flipped rather than
+        // reported as unchanged - this is the case a missing capture of the
+        // favourited markup would otherwise turn into a wrong 「已取消收藏」.
+        val unknownWording = FavoriteMark("★ 收藏中", on = false)
+        Parse.favoriteChange(off, unknownWording).let {
+            assertTrue(it.changed)
+            assertTrue("must flip when the label moved", it.mark.on)
+        }
+
+        // Same label, same reading: nothing is asserted.
+        Parse.favoriteChange(off, FavoriteMark("收藏", on = false)).let {
+            assertFalse(it.changed)
+        }
+
+        // No "before" to compare with - the answer is all there is.
+        Parse.favoriteChange(null, on).let {
+            assertTrue(it.changed)
+            assertTrue(it.mark.on)
+        }
     }
 
     /**

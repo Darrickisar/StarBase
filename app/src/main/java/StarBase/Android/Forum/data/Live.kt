@@ -134,6 +134,19 @@ data class FavoriteMark(
     val on: Boolean
 )
 
+/**
+ * What a 收藏 tap did, read from the page the site answered with.
+ *
+ * [changed] is the honest half. 收藏 is the site's own list, so the only proof
+ * that a tap landed is that the site now draws the button differently than it
+ * did before - and if it draws it the same, saying 「已收藏」 would be the same
+ * kind of lie the old 回帖 bug told.
+ */
+data class FavoriteChange(
+    val mark: FavoriteMark,
+    val changed: Boolean
+)
+
 /** A loaded topic page. */
 data class TopicDetail(
     val id: Int,

@@ -439,13 +439,21 @@ class TopicViewModel : ViewModel() {
         favoriting = true
         viewModelScope.launch {
             try {
-                val mark = Api.toggleFavorite(requested)
+                val change = Api.toggleFavorite(requested)
                 if (requested != topicId) return@launch
-                if (mark == null) {
-                    notice = "站点没有返回收藏状态，可能需要重新登录"
-                } else {
-                    favorite = mark
-                    notice = if (mark.on) "已加入收藏" else "已取消收藏"
+                when {
+                    change == null ->
+                        notice = "站点没有返回收藏状态，可能需要重新登录"
+                    // The site drew the same button back. Rather than claim a
+                    // change the website may not have, say what is known.
+                    !change.changed -> {
+                        favorite = change.mark
+                        notice = "站点没有确认这次操作，去网页看一下收藏列表"
+                    }
+                    else -> {
+                        favorite = change.mark
+                        notice = if (change.mark.on) "已加入收藏" else "已取消收藏"
+                    }
                 }
             } catch (e: Api.NeedsBrowser) {
                 if (requested == topicId) notice = e.message.orEmpty()

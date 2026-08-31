@@ -12,7 +12,7 @@ import org.jsoup.Jsoup
 import StarBase.Android.Forum.data.AccountSettings
 import StarBase.Android.Forum.data.Board
 import StarBase.Android.Forum.data.Conversation
-import StarBase.Android.Forum.data.FavoriteMark
+import StarBase.Android.Forum.data.FavoriteChange
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.GachaAction
 import StarBase.Android.Forum.data.GachaPage
@@ -130,20 +130,26 @@ object Api {
     }
 
     /**
-     * Flips 收藏 on a topic and reports the state the site came back with.
+     * Flips 收藏 on a topic, and reports whether the site's own page changed.
      *
-     * There is no local bookmark list behind this - 收藏 is the site's own, and
-     * this posts the form the topic page renders. That form declares
-     * `data-no-ajax="1"`, so the answer is a rendered page rather than JSON:
-     * the new state is read out of the page the site returns, and only if that
-     * page carries no 收藏 form at all is the topic re-read to find it.
+     * There is no local list behind this: 收藏 is the site's, so what this does
+     * shows up in `/user/{uid}?tab=favorites` on the website - the app is posting
+     * the very form the topic page renders. That form declares
+     * `data-no-ajax="1"`, so the answer is a rendered page rather than JSON.
+     *
+     * The page is read twice - before and after - and the two buttons are
+     * compared ([Parse.favoriteChange]) rather than the answer being classified
+     * on its own. The reason is that this project holds no capture of the
+     * site's already-favourited markup, so "the button is different now" is the
+     * only claim that does not depend on guessing what that markup looks like.
      *
      * Returns null when the page has no such form - a guest, or a topic the site
      * does not offer it on.
      */
-    suspend fun toggleFavorite(topicId: Int): FavoriteMark? = io {
-        val page = Net.getText(Site.topic(topicId))
-        val form = Parse.favoriteForm(Jsoup.parse(page, Site.BASE)) ?: return@io null
+    suspend fun toggleFavorite(topicId: Int): FavoriteChange? = io {
+        val page = Jsoup.parse(Net.getText(Site.topic(topicId)), Site.BASE)
+        val form = Parse.favoriteForm(page) ?: return@io null
+        val before = Parse.favoriteMark(page)
 
         if (form.turnstile) {
             throw NeedsBrowser(Site.topic(topicId), "这个操作需要人机验证，用网页方式收藏")
@@ -155,8 +161,13 @@ object Api {
             throw SiteException("登录状态已失效，请重新登录", SiteException.Kind.AUTH)
         }
 
-        Parse.favoriteMark(Jsoup.parse(answer, Site.BASE))
+        // Normally the POST answers with the re-rendered topic page. If it did
+        // not carry the button, read the topic again rather than assume.
+        val after = Parse.favoriteMark(Jsoup.parse(answer, Site.BASE))
             ?: Parse.favoriteMark(Jsoup.parse(Net.getText(Site.topic(topicId)), Site.BASE))
+            ?: return@io null
+
+        Parse.favoriteChange(before, after)
     }
 
     /**

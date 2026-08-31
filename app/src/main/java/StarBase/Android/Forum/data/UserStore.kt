@@ -68,16 +68,18 @@ enum class UpdateCheck(val key: String, val label: String, val intervalMs: Long)
 }
 
 /**
- * Device-local preferences. Not a cache.
+ * Device-local state. Not a cache of the site.
  *
- * Nothing about linux.sb is kept here - no topics, no titles, no lists. Every
- * screen's content comes from a request made while it was on screen, so this
- * holds only settings that have no server side at all: which appearance to
- * draw, how often to look at GitHub for a build, and what that look last found.
+ * No post, list or profile is kept here: every screen's content comes from a
+ * request made while it was on screen. What this file holds is the settings that
+ * have no server side at all - appearance, how often to look at GitHub for a
+ * build, what that look last found - and 浏览历史.
  *
- * 收藏 used to live here as a local list. It is the site's own now
- * ([StarBase.Android.Forum.net.Api.toggleFavorite]), which is why it is gone
- * from this file: a device-local copy of it could disagree with the website.
+ * The two lists that used to be here are the reason for that distinction. 收藏
+ * is the *site's* list ([StarBase.Android.Forum.net.Api.toggleFavorite]), so a
+ * copy here could disagree with the website and it is gone. 浏览历史 has no
+ * server side to disagree with - linux.sb does not record what you read - so it
+ * is the app's own feature, and local is the only place it could live.
  */
 class UserStore private constructor(private val prefs: SharedPreferences) {
 
@@ -104,11 +106,28 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
     var seenTag: String by mutableStateOf(prefs.getString(KEY_SEEN_TAG, "").orEmpty())
         private set
 
+    /**
+     * 浏览历史, newest first. The app's own record - see [History].
+     *
+     * Held as one immutable list rather than a mutable state list because every
+     * change goes through [History], which returns a new list.
+     */
+    var history: List<Visit> by mutableStateOf(History.decode(prefs.getString(KEY_HISTORY, "").orEmpty()))
+        private set
+
+    /**
+     * Whether visits are recorded at all. On by default; turning it off stops
+     * new entries but leaves what is already there, because clearing is its own
+     * decision and its own button.
+     */
+    var keepHistory: Boolean by mutableStateOf(prefs.getBoolean(KEY_KEEP_HISTORY, true))
+        private set
+
     init {
-        // An install upgraded from 1.0.3 still has the old local 收藏 / 浏览历史
-        // / 标题 entries sitting in this file. They are no longer read, so they
-        // are dropped here rather than left on disk as data the app claims not
-        // to keep.
+        // 1.0.3 and earlier kept 收藏 and 浏览历史 as delimited id/title strings.
+        // 收藏 is the site's now and never comes back; 浏览历史 was rewritten
+        // (JSON, timestamps, counts) and does not read the old shape. Both keys
+        // are dropped rather than left on disk unread.
         val legacy = LEGACY_KEYS.filter { prefs.contains(it) }
         if (legacy.isNotEmpty()) {
             prefs.edit().apply { legacy.forEach { remove(it) } }.apply()
@@ -119,6 +138,60 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
         if (mode == themeMode) return
         themeMode = mode
         prefs.edit().putString(KEY_THEME, mode.key).apply()
+    }
+
+    /**
+     * Records a visit. Does nothing when recording is off.
+     *
+     * The title arrives later than the id - a topic is tapped before its page
+     * answers - so this is called twice for one visit, and [History.record]
+     * keeps the title the second call brings without counting the visit twice.
+     */
+    fun recordVisit(id: Int, title: String = "", forumName: String = "", now: Long = System.currentTimeMillis()) {
+        if (!keepHistory || id <= 0) return
+        val already = history.firstOrNull { it.id == id }
+        // The second call for the same visit fills in the title; it must not read
+        // as a second visit. Anything past the window is a genuine re-open.
+        val sameVisit = already != null && now - already.at < SAME_VISIT_MS
+        val next = if (sameVisit) {
+            History.remove(history, id).let { rest ->
+                listOf(
+                    already!!.copy(
+                        title = title.ifBlank { already.title },
+                        forumName = forumName.ifBlank { already.forumName },
+                        at = now
+                    )
+                ) + rest
+            }
+        } else {
+            History.record(history, Visit(id = id, title = title, forumName = forumName, at = now))
+        }
+        if (next == history) return
+        history = next
+        persistHistory()
+    }
+
+    fun forgetVisit(id: Int) {
+        val next = History.remove(history, id)
+        if (next == history) return
+        history = next
+        persistHistory()
+    }
+
+    fun clearHistory() {
+        if (history.isEmpty()) return
+        history = emptyList()
+        persistHistory()
+    }
+
+    fun updateKeepHistory(keep: Boolean) {
+        if (keep == keepHistory) return
+        keepHistory = keep
+        prefs.edit().putBoolean(KEY_KEEP_HISTORY, keep).apply()
+    }
+
+    private fun persistHistory() {
+        prefs.edit().putString(KEY_HISTORY, History.encode(history)).apply()
     }
 
     fun updateCheckMode(mode: UpdateCheck) {
@@ -142,8 +215,17 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
         private const val KEY_UPDATE_CHECK = "update_check"
         private const val KEY_LAST_CHECK = "update_last_check"
         private const val KEY_SEEN_TAG = "update_seen_tag"
+        private const val KEY_HISTORY = "visits"
+        private const val KEY_KEEP_HISTORY = "keep_history"
 
-        /** Written by 1.0.3 and earlier; removed on first run of this build. */
+        /**
+         * Two calls land for one visit - the tap, then the loaded title - so a
+         * repeat inside this window is the same visit being completed rather
+         * than a re-open.
+         */
+        private const val SAME_VISIT_MS = 60_000L
+
+        /** Written by 1.0.3 and earlier, in a shape nothing reads now. */
         private val LEGACY_KEYS = listOf("bookmarks", "history", "titles")
 
         @Volatile

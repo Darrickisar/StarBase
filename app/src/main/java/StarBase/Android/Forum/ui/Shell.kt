@@ -67,6 +67,7 @@ import StarBase.Android.Forum.ui.screens.ForumListViewModel
 import StarBase.Android.Forum.ui.screens.ForumScreen
 import StarBase.Android.Forum.ui.screens.ForumViewModel
 import StarBase.Android.Forum.ui.screens.GachaScreen
+import StarBase.Android.Forum.ui.screens.HistoryScreen
 import StarBase.Android.Forum.ui.screens.GachaViewModel
 import StarBase.Android.Forum.ui.screens.HomeFeed
 import StarBase.Android.Forum.ui.screens.HomeScreen
@@ -128,6 +129,8 @@ sealed interface Route {
     data object Settings : Route
     /** 应用设置. App-local, so it opens signed out too. */
     data object AppSettings : Route
+    /** 浏览历史. The app's own record, so this one needs no session either. */
+    data object History : Route
     data class Login(val register: Boolean = false) : Route
     /**
      * A site page in a WebView. [offSite] is for the one errand that has to
@@ -160,6 +163,7 @@ private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     is Route.NewTopic -> "new-topic"
     Route.Settings -> "settings"
     Route.AppSettings -> "app-settings"
+    Route.History -> "history"
 }
 
 @Composable
@@ -220,6 +224,9 @@ fun Shell(store: UserStore) {
 
     fun openTopic(id: Int) {
         if (id <= 0) return
+        // The id is all that is known at the tap; the title is filled in below
+        // once the page answers, which History treats as the same visit.
+        store.recordVisit(id)
         push(Route.Topic(id))
     }
 
@@ -386,6 +393,22 @@ fun Shell(store: UserStore) {
                             )
 
                             is Route.Topic -> {
+                                // 浏览历史 is the app's own, and a title only
+                                // exists once the page has loaded - so the entry
+                                // opened on tap is completed here rather than
+                                // listing a bare id.
+                                val loaded = (topic.state as? Load.Ready)?.value
+                                    ?.takeIf { it.id == route.id }
+                                LaunchedEffect(loaded?.id, loaded?.title) {
+                                    val title = loaded?.title.orEmpty()
+                                    if (title.isNotBlank()) {
+                                        store.recordVisit(
+                                            id = route.id,
+                                            title = title,
+                                            forumName = loaded?.forumName.orEmpty()
+                                        )
+                                    }
+                                }
                                 TopicScreen(
                                     topicId = route.id,
                                     vm = topic,
@@ -483,6 +506,12 @@ fun Shell(store: UserStore) {
                                 onOpenSite = { openSitePage("发新帖", it) }
                             )
 
+                            Route.History -> HistoryScreen(
+                                store = store,
+                                onBack = ::pop,
+                                onTopic = ::openTopic
+                            )
+
                             Route.Settings -> SettingsScreen(
                                 vm = settings,
                                 signedIn = session.signedIn,
@@ -501,7 +530,8 @@ fun Shell(store: UserStore) {
                             Route.AppSettings -> AppSettingsScreen(
                                 store = store,
                                 vm = update,
-                                onBack = ::pop
+                                onBack = ::pop,
+                                onHistory = { push(Route.History) }
                             )
 
                             is Route.Login -> AuthScreen(

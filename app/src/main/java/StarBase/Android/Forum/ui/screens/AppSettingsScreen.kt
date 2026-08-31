@@ -228,7 +228,8 @@ class UpdateViewModel : ViewModel() {
 fun AppSettingsScreen(
     store: UserStore,
     vm: UpdateViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onHistory: () -> Unit
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { vm.autoCheck(store) }
@@ -242,7 +243,8 @@ fun AppSettingsScreen(
         LazyColumn {
             item("update") { Gap(12); UpdateCard(store = store, vm = vm) }
             item("theme") { Gap(12); ThemeCard(store = store) }
-            item("local") { Gap(12); LocalDataCard(store = store) }
+            item("history") { Gap(12); HistoryCard(store = store, onOpen = onHistory) }
+            item("local") { Gap(12); LocalDataCard() }
             item("about") {
                 Gap(12)
                 AboutCard(onOpenReleases = { openInBrowser(context, Github.releasesPage) })
@@ -495,24 +497,59 @@ private fun ThemeCard(store: UserStore) {
 }
 
 /**
+ * 浏览历史. The app's own feature - linux.sb records nothing of the kind - so it
+ * belongs on this page rather than in 我的内容, which is the site's content.
+ */
+@Composable
+private fun HistoryCard(store: UserStore, onOpen: () -> Unit) {
+    val tokens = LocalTokens.current
+    SbCard(modifier = cardWidth(), padding = 14.dp) {
+        CardTitle(
+            text = "浏览历史",
+            tail = if (store.history.isEmpty()) "" else "${store.history.size} 条"
+        )
+        Gap(5)
+        Text(
+            text = "App 自己记的，站点没有这个功能，也看不到这份记录。只存在这台手机上，" +
+                "点开哪一条都是去取最新的那一页。",
+            style = MaterialTheme.typography.bodySmall,
+            color = tokens.textSecondary
+        )
+        Gap(12)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SmallAction("查看", primary = true, onClick = onOpen)
+            SmallAction(
+                text = if (store.keepHistory) "记录：开" else "记录：关",
+                primary = false,
+                onClick = { store.updateKeepHistory(!store.keepHistory) }
+            )
+            if (store.history.isNotEmpty()) {
+                SmallAction("清空", primary = false, onClick = store::clearHistory)
+            }
+        }
+    }
+}
+
+/**
  * 本机数据. Kept as a card because the honest answer is short and worth stating:
  * the app stores no linux.sb content at all, so there is nothing here to clear.
  */
 @Composable
-private fun LocalDataCard(store: UserStore) {
+private fun LocalDataCard() {
     val tokens = LocalTokens.current
     SbCard(modifier = cardWidth(), padding = 14.dp) {
         CardTitle(text = "本机数据")
         Gap(5)
         Text(
-            text = "本机只存三样：外观、检查更新的时机、以及上次查到的版本号。" +
-                "帖子、收藏、通知、私信都不落地——每次打开都是现取的。",
+            text = "站点的内容一律不落地：帖子、收藏、通知、私信都是每次打开现取的。" +
+                "本机存的是外观、检查更新的时机、上次查到的版本号，以及上面那份浏览历史。",
             style = MaterialTheme.typography.bodySmall,
             color = tokens.textSecondary
         )
         Gap(7)
         Text(
-            text = "收藏是网站上的收藏，不是本机的列表，所以在网页上取消，App 里也就没了。",
+            text = "收藏是网站上的收藏，不是本机的列表，所以在网页上取消，App 里也就没了。" +
+                "浏览历史反过来——站点没这个功能，所以它只在这台手机上。",
             style = MaterialTheme.typography.labelSmall,
             color = tokens.textTertiary
         )

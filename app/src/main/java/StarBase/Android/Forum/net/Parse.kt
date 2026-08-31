@@ -11,6 +11,7 @@ import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.ForumRef
+import StarBase.Android.Forum.data.FavoriteChange
 import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.GachaAction
 import StarBase.Android.Forum.data.GachaPage
@@ -552,6 +553,32 @@ object Parse {
             tokens.any { it in ACTIVE_FAV_CLASSES } ||
             label.contains("取消") || label.startsWith("已")
         return FavoriteMark(label = label.ifBlank { "收藏" }, on = on)
+    }
+
+    /**
+     * Works out what a 收藏 tap did, from the button before and after.
+     *
+     * Reading the new state from the answer alone means trusting that we can tell
+     * the site's "already favourited" markup from its plain one - and this
+     * project has no capture of the favourited state to check that against. So
+     * the comparison is the authority instead: **the label changed** is a fact
+     * that needs no such knowledge.
+     *
+     * When the label changed but both read as the same state, the classifier
+     * missed one of them; the tap plainly did something, so [before] is flipped
+     * rather than believed. When the label did not change at all, nothing is
+     * asserted - [FavoriteChange.changed] is false and the caller says so.
+     */
+    fun favoriteChange(before: FavoriteMark?, after: FavoriteMark): FavoriteChange {
+        if (before == null) return FavoriteChange(after, changed = true)
+        val relabelled = before.label != after.label
+        return when {
+            before.on != after.on -> FavoriteChange(after, changed = true)
+            // The site reworded the button but our reading of both came out the
+            // same, so the reading is what is wrong, not the site.
+            relabelled -> FavoriteChange(after.copy(on = !before.on), changed = true)
+            else -> FavoriteChange(after, changed = false)
+        }
     }
 
     fun replyForm(doc: Document): SiteForm? =
