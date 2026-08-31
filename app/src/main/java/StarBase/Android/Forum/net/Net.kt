@@ -20,6 +20,12 @@ object Site {
     const val GACHA = "$BASE/gacha"
     const val SEARCH = "$BASE/search"
 
+    /**
+     * 个人设置. The sidebar links it as `/profile`; there is no `/settings` on
+     * this site, which is where the app's 「网站设置」 button used to send people.
+     */
+    const val PROFILE = "$BASE/profile"
+
     /** 发新帖. The site calls this `topic_edit`; `id=0` in the form means "new". */
     const val NEW_TOPIC = "$BASE/topic_edit"
 

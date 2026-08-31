@@ -87,6 +87,7 @@ import StarBase.Android.Forum.ui.screens.ProfileViewModel
 import StarBase.Android.Forum.ui.screens.RankScreen
 import StarBase.Android.Forum.ui.screens.RankViewModel
 import StarBase.Android.Forum.ui.screens.SettingsScreen
+import StarBase.Android.Forum.ui.screens.SettingsViewModel
 import StarBase.Android.Forum.ui.screens.TopicScreen
 import StarBase.Android.Forum.ui.screens.TopicViewModel
 import StarBase.Android.Forum.ui.theme.LocalTokens
@@ -125,7 +126,12 @@ sealed interface Route {
     data object Bookmarks : Route
     data object Settings : Route
     data class Login(val register: Boolean = false) : Route
-    data class SitePage(val title: String, val url: String) : Route
+    /**
+     * A site page in a WebView. [offSite] is for the one errand that has to
+     * leave linux.sb and come back - 第三方登录 绑定 - because the browser this
+     * would otherwise be handed to is not signed in to this session.
+     */
+    data class SitePage(val title: String, val url: String, val offSite: Boolean = false) : Route
 }
 
 /**
@@ -169,6 +175,7 @@ fun Shell(store: UserStore) {
     val messages: MessagesViewModel = viewModel()
     val profile: ProfileViewModel = viewModel()
     val gacha: GachaViewModel = viewModel()
+    val settings: SettingsViewModel = viewModel()
 
     var tab by remember { mutableStateOf(Tab.HOME) }
     val stack = remember { mutableStateListOf<Route>() }
@@ -480,11 +487,18 @@ fun Shell(store: UserStore) {
 
                             Route.Settings -> SettingsScreen(
                                 store = store,
+                                vm = settings,
                                 signedIn = session.signedIn,
                                 onBack = ::pop,
                                 onLogin = { push(Route.Login()) },
                                 onSignOut = { session.signOut { pop() } },
-                                onOpenSite = { openSitePage("账号设置", it) }
+                                onOpenSite = { openSitePage("账号设置", it) },
+                                // 绑定 leaves the site for GitHub or Google and
+                                // comes back, and the name it comes back with is
+                                // 我的 own - so the session is re-read after it.
+                                onBindOAuth = { url ->
+                                    push(Route.SitePage("第三方登录", url, offSite = true))
+                                }
                             )
 
                             is Route.Login -> AuthScreen(
@@ -501,6 +515,7 @@ fun Shell(store: UserStore) {
                             is Route.SitePage -> SitePageScreen(
                                 title = route.title,
                                 url = route.url,
+                                allowOffSite = route.offSite,
                                 onBack = ::pop,
                                 onLogin = ::replaceWithLogin
                             )

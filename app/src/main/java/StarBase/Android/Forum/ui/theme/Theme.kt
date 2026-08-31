@@ -48,6 +48,8 @@ private val Amber = Color(0xFFD8B37A)
 private val AmberGlow = Color(0xFFF0D3A6)
 private val AmberDeep = Color(0xFFA8814B)
 private val Ember = Color(0xFFE08B62)
+/** 精华's own gold: cooler and brighter than Amber, so 精 ≠ 置顶 at a glance. */
+private val Gold = Color(0xFFE3C56A)
 
 // -- text (§08) --------------------------------------------------------------
 private val TextPrimary = Color(0xFFF6F3EF)
@@ -71,6 +73,7 @@ private val LightInkTertiary = Color(0xFF8B8F99)
 private val AmberInk = Color(0xFF8A6220)
 private val AmberMid = Color(0xFFB4832F)
 private val EmberInk = Color(0xFFC4552A)
+private val GoldInk = Color(0xFF8F6A14)
 
 /** §08 圆角: field / button / main container. */
 object SbRadius {
@@ -125,6 +128,8 @@ data class SbTokens(
     val accentDeep: Color,
     val pinTint: Color,
     val hotTint: Color,
+    /** 精华. Sits between pin-amber and hot-ember so the three read apart. */
+    val digestTint: Color,
     /** Text drawn on an accent-filled surface, e.g. a primary button. */
     val onAccent: Color,
     val textPrimary: Color,
@@ -160,6 +165,7 @@ private val GlassTokens = SbTokens(
     accentDeep = AmberDeep,
     pinTint = Amber,
     hotTint = Ember,
+    digestTint = Gold,
     onAccent = Color(0xFF241A0C),
     textPrimary = TextPrimary,
     textSecondary = TextSecondary,
@@ -210,6 +216,7 @@ private val LightTokens = SbTokens(
     accentDeep = AmberMid,
     pinTint = AmberMid,
     hotTint = EmberInk,
+    digestTint = GoldInk,
     onAccent = Color(0xFFFFF8EC),
     textPrimary = LightInk,
     textSecondary = LightInkSecondary,

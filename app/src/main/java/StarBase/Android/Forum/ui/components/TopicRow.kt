@@ -13,12 +13,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.InlineTextContent
+import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -57,31 +68,49 @@ fun TopicRow(
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // 精 and 热 are title suffixes on the site, so they follow the title
+            // here too rather than leading it. 置顶 keeps the leading slot it has
+            // on the site, where it sits before the title.
+            val marks = buildList {
+                if (topic.featured) add(TitleMark("精", tokens.digestTint))
+                if (topic.hot) add(TitleMark("热", tokens.hotTint))
+            }
+            // A title long enough to fill both lines would swallow the suffixes,
+            // so once we see that happen they move to a line of their own. Latched
+            // to one direction: dropping them cannot make the title overflow
+            // again, and re-measuring both ways would oscillate.
+            var marksClipped by remember(topic.id) { mutableStateOf(false) }
+            val marksInline = marks.isNotEmpty() && !marksClipped
+
+            Row(verticalAlignment = Alignment.Top) {
                 if (topic.pinned) {
                     Chip(
                         text = "置顶",
                         tint = tokens.pinTint,
-                        container = tokens.pinTint.copy(alpha = 0.12f)
+                        container = tokens.pinTint.copy(alpha = 0.12f),
+                        // Top-aligned so a two-line title does not leave the chip
+                        // floating at its middle; 1dp puts it on the first line's
+                        // optical centre.
+                        modifier = Modifier.padding(top = 1.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                 }
-                if (topic.hot) {
-                    Chip(
-                        text = "热",
-                        tint = tokens.hotTint,
-                        container = tokens.hotTint.copy(alpha = 0.12f)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                }
-                Text(
-                    text = topic.title,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
-                    color = tokens.textPrimary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                TopicTitle(
+                    title = topic.title,
+                    marks = if (marksInline) marks else emptyList(),
+                    onClipped = { if (marksInline) marksClipped = true },
                     modifier = Modifier.weight(1f, fill = false)
                 )
+            }
+
+            if (marks.isNotEmpty() && !marksInline) {
+                Spacer(Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    marks.forEachIndexed { i, mark ->
+                        if (i > 0) Spacer(Modifier.width(6.dp))
+                        MarkChip(mark)
+                    }
+                }
             }
 
             // 回帖 rows carry what was written. It sits under the topic title, so
@@ -112,7 +141,9 @@ fun TopicRow(
                 }
             }
 
-            if (topic.stampText.isNotBlank() && !topic.stampText.contains("置顶")) {
+            // 抽奖中 / 发卡中 only - the parser keeps 置顶/精华/热 out of this now,
+            // so it no longer repeats the marks drawn above.
+            if (topic.stampText.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
                 Chip(
                     text = topic.stampText,
@@ -126,6 +157,89 @@ fun TopicRow(
             Spacer(Modifier.width(10.dp))
             ReplyBadge(topic.replies)
         }
+    }
+}
+
+/** One single-character mark drawn after a topic title: 精 or 热. */
+private data class TitleMark(val text: String, val tint: Color)
+
+/** Mark ids for the title's inline content slots. */
+private const val MARK_SLOT = "mark:"
+
+/**
+ * The title, with its marks set inline so they sit right after the last word and
+ * wrap with it instead of being pushed to the far edge of the row.
+ *
+ * [onClipped] fires when the title needed more room than it has, which is also
+ * when the trailing marks would have been eaten by the ellipsis.
+ */
+@Composable
+private fun TopicTitle(
+    title: String,
+    marks: List<TitleMark>,
+    onClipped: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tokens = LocalTokens.current
+    val density = LocalDensity.current
+    // Placeholders are measured in sp, the marks in dp, so convert once.
+    val markWidth = with(density) { MARK_WIDTH.toSp() }
+    val markHeight = with(density) { MARK_HEIGHT.toSp() }
+
+    val text = remember(title, marks) {
+        buildAnnotatedString {
+            append(title)
+            marks.forEachIndexed { i, _ ->
+                // A real space, so a line may break before a mark rather than
+                // splitting the placeholder off the text awkwardly.
+                append(" ")
+                appendInlineContent(MARK_SLOT + i, "·")
+            }
+        }
+    }
+    val inline = remember(marks, markWidth, markHeight) {
+        marks.mapIndexed { i, mark ->
+            MARK_SLOT + i to InlineTextContent(
+                Placeholder(
+                    width = markWidth,
+                    height = markHeight,
+                    placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
+                )
+            ) { MarkChip(mark) }
+        }.toMap()
+    }
+
+    Text(
+        text = text,
+        inlineContent = inline,
+        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+        color = tokens.textPrimary,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { if (it.hasVisualOverflow) onClipped() },
+        modifier = modifier
+    )
+}
+
+private val MARK_WIDTH = 22.dp
+private val MARK_HEIGHT = 17.dp
+
+/** The 精 / 热 pill: same shape language as [Chip], sized to one character. */
+@Composable
+private fun MarkChip(mark: TitleMark) {
+    Box(
+        modifier = Modifier
+            .size(width = MARK_WIDTH, height = MARK_HEIGHT)
+            .clip(RoundedCornerShape(6.dp))
+            .background(mark.tint.copy(alpha = 0.14f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = mark.text,
+            style = MaterialTheme.typography.labelSmall,
+            color = mark.tint,
+            maxLines = 1
+        )
     }
 }
 

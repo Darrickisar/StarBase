@@ -53,14 +53,22 @@ fun isSiteAuthUrl(raw: String): Boolean {
     return authPaths.any { path == it || path.startsWith("$it/") }
 }
 
-/** Full-screen WebView for site pages the app has no native screen for. */
+/**
+ * Full-screen WebView for site pages the app has no native screen for.
+ *
+ * [allowOffSite] is for an errand that has to leave the site and come back -
+ * 第三方登录 绑定 hops to GitHub or Google and returns to linux.sb with the code.
+ * Handing that hop to the external browser, which the default does, would send
+ * it to a place that has no session, so the binding would land on nobody.
+ */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun SitePageScreen(
     title: String,
     url: String,
     onBack: () -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    allowOffSite: Boolean = false
 ) {
     val context = LocalContext.current
     val tokens = LocalTokens.current
@@ -84,6 +92,11 @@ fun SitePageScreen(
                 setGeolocationEnabled(false)
             }
             CookieManager.getInstance().setAcceptCookie(true)
+            // GitHub and Google carry their own sign-in state in cookies that are
+            // third-party to the page doing the binding.
+            if (allowOffSite) {
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
                     view: WebView,
@@ -96,6 +109,7 @@ fun SitePageScreen(
                             true
                         }
                         target.startsWith(Site.BASE) -> false
+                        allowOffSite -> false
                         else -> {
                             openInBrowser(view.context, target)
                             true

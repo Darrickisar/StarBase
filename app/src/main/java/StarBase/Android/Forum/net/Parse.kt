@@ -3,7 +3,10 @@ package StarBase.Android.Forum.net
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import StarBase.Android.Forum.data.AccountSettings
+import StarBase.Android.Forum.data.AvatarPreset
 import StarBase.Android.Forum.data.Board
+import StarBase.Android.Forum.data.BoardTab
 import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.ForumPage
@@ -17,6 +20,7 @@ import StarBase.Android.Forum.data.HomePage
 import StarBase.Android.Forum.data.LiveBlock
 import StarBase.Android.Forum.data.Me
 import StarBase.Android.Forum.data.NotifyItem
+import StarBase.Android.Forum.data.OAuthBinding
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.RankRowData
@@ -170,8 +174,17 @@ object Parse {
         val timeText = li.selectFirst(".post-meta [data-performance-time]")?.text()?.trim()
             ?: li.select(".post-meta > span").lastOrNull()?.text()?.trim().orEmpty()
 
-        val stamps = li.select(".topic-stamp-badge, .community-lottery-title-status")
-        val stampText = stamps.joinToString(" ") { it.text().trim() }.trim()
+        // The title row carries up to five separate marks, each with its own
+        // class: 置顶 (.topic-badge.pinned, plus topic-pinned on the li itself),
+        // 精华 (.topic-management-featured-badge), 热 (.topic-stamp-hot), and the
+        // two wordier statuses 抽奖中 / 发卡中. The first three get their own flag
+        // so the row can place them; only the rest becomes free stamp text.
+        val pinned = li.hasClass("topic-pinned") || li.selectFirst(".topic-badge.pinned") != null
+        val featured = li.selectFirst(".topic-management-featured-badge") != null
+        val hot = li.selectFirst(".topic-stamp-hot") != null
+        val stampText = li.select(".community-lottery-title-status, .virtual-card-title-status")
+            .joinToString(" ") { it.text().trim() }
+            .trim()
 
         return TopicCard(
             id = id,
@@ -183,9 +196,9 @@ object Parse {
             forumName = forumLink?.text()?.trim().orEmpty(),
             replies = replies,
             timeText = timeText,
-            pinned = li.selectFirst(".topic-stamp-top, .post-tag-top") != null ||
-                stampText.contains("置顶"),
-            hot = li.selectFirst(".topic-stamp-hot") != null,
+            pinned = pinned,
+            hot = hot,
+            featured = featured,
             stampText = stampText,
             // Only 回帖 rows have this: what was written, under the topic title.
             excerpt = li.textOf(".profile-reply-excerpt")
@@ -412,7 +425,21 @@ object Parse {
         val fields = LinkedHashMap<String, String>()
         val textareas = mutableListOf<String>()
 
-        for (el in form.select("input[name], textarea[name], select[name], button[name]")) {
+        // A browser submits the fields the HTML5 `form=` attribute attaches to
+        // this form as well as the ones nested inside it, and skips a nested
+        // field that points somewhere else. 用户名修改 on /profile is written the
+        // first way - `#username-change-form` holds nothing but its `_csrf`, and
+        // `new_username` / `current_password` live outside it - so a reader that
+        // only walks the subtree posts a rename with no name in it.
+        val id = form.id()
+        val submittable = doc.select("input[name], textarea[name], select[name], button[name]")
+            .filter { el ->
+                val declared = el.attr("form")
+                if (declared.isNotBlank()) id.isNotBlank() && declared == id
+                else el.parents().firstOrNull { it.normalName() == "form" } === form
+            }
+
+        for (el in submittable) {
             val name = el.attr("name")
             if (name.isBlank() || el.hasAttr("disabled")) continue
 
@@ -1051,35 +1078,75 @@ object Parse {
 
     // ---- leaderboards, notifications, messages, profiles ---------------------
 
-    fun boards(html: String): List<Board> {
+    /**
+     * 榜单, off `/leaderboard?type=…`.
+     *
+     * Two things about this page are easy to get wrong, and the previous reader
+     * got both. First, each 榜单 is its **own page** reached by a `type` query -
+     * not several panels stacked on one page, so this returns one [Board] and
+     * lists the other four in [Board.tabs] rather than trying to find them here.
+     * Second, the top three are **not** in `.leaderboard-list`: they are a
+     * separate `.leaderboard-podium`, in the visual order 2-1-3. Reading only the
+     * list yields a board that starts at rank 4.
+     */
+    fun board(html: String): Board {
         val doc = Jsoup.parse(html, Site.BASE)
-        val out = mutableListOf<Board>()
+        val page = doc.selectFirst(".leaderboard-page")
+            ?: return Board(key = "", label = "")
 
-        doc.select("[data-leaderboard], .leaderboard-card, .leaderboard-panel").forEach { panel ->
-            val key = panel.attr("data-leaderboard").ifBlank { panel.id() }
-            val label = panel.selectFirst(".leaderboard-title, .quick-title, h2, h3")
-                ?.text()?.trim().orEmpty()
-            val rows = panel.select("li, tr").mapIndexedNotNull { i, row ->
-                val nameLink = row.selectFirst("a[href*=/user/]") ?: return@mapIndexedNotNull null
-                val name = nameLink.text().trim().ifBlank {
-                    row.selectFirst("img.avatar-img")?.attr("alt")?.trim().orEmpty()
-                }
-                if (name.isBlank()) return@mapIndexedNotNull null
-                RankRowData(
-                    rank = firstInt(row.textOf(".leaderboard-rank, .rank")).takeIf { it > 0 } ?: (i + 1),
-                    name = name,
-                    userId = idFrom(nameLink.attr("href"), "user"),
-                    avatar = row.selectFirst("img.avatar-img")?.attrUrl("src").orEmpty(),
-                    group = row.textOf(".user-uid-badge-group-name"),
-                    count = row.textOf(".leaderboard-count, .count, .value")
-                )
-            }
-            if (rows.isNotEmpty()) {
-                out += Board(key = key.ifBlank { "board${out.size}" }, label = label, rows = rows)
-            }
+        val tabs = page.select(".leaderboard-tab").mapNotNull { a ->
+            val key = queryValue(a.attr("href"), "type")
+            if (key.isBlank()) null else BoardTab(key = key, label = a.text().trim())
         }
-        return out
+        val activeTab = page.selectFirst(".leaderboard-tab.active")
+        val key = queryValue(activeTab?.attr("href").orEmpty(), "type")
+            .ifBlank { tabs.firstOrNull()?.key.orEmpty() }
+
+        // The podium's DOM order is 2-1-3, so its own step number is the rank -
+        // never the position it was found in.
+        val podium = page.select(".leaderboard-podium-col").mapNotNull { col ->
+            val rank = firstInt(col.textOf(".leaderboard-podium-step"))
+            if (rank == 0) return@mapNotNull null
+            RankRowData(
+                rank = rank,
+                name = col.textOf(".leaderboard-podium-name"),
+                userId = idFrom(col.attr("href"), "user"),
+                avatar = col.selectFirst("img.avatar-img")?.attrUrl("src").orEmpty(),
+                group = col.textOf(".leaderboard-podium-group"),
+                count = col.textOf(".leaderboard-podium-count")
+            )
+        }
+
+        val rest = page.select(".leaderboard-item").mapIndexedNotNull { i, row ->
+            val name = row.textOf(".leaderboard-name")
+                .ifBlank { row.selectFirst("img.avatar-img")?.attr("alt")?.trim().orEmpty() }
+            if (name.isBlank()) return@mapIndexedNotNull null
+            RankRowData(
+                // The badge holds the rank; the index is only a fallback, and it
+                // has to account for the three the podium already took.
+                rank = firstInt(row.textOf(".leaderboard-rank-badge")).takeIf { it > 0 }
+                    ?: (podium.size + i + 1),
+                name = name,
+                userId = idFrom(row.attr("href"), "user"),
+                avatar = row.selectFirst("img.avatar-img")?.attrUrl("src").orEmpty(),
+                group = row.textOf(".leaderboard-group"),
+                count = row.textOf(".leaderboard-count")
+            )
+        }
+
+        return Board(
+            key = key,
+            label = activeTab?.text()?.trim().orEmpty()
+                .ifBlank { page.textOf(".leaderboard-title") },
+            subtitle = page.textOf(".leaderboard-subtitle"),
+            tabs = tabs,
+            rows = (podium + rest).sortedBy { it.rank }
+        )
     }
+
+    /** Reads one query parameter out of a link the site rendered. */
+    private fun queryValue(href: String, name: String): String =
+        Regex("[?&]${Regex.escape(name)}=([^&#]*)").find(href)?.groupValues?.get(1).orEmpty()
 
     fun notifications(html: String): List<NotifyItem> {
         val doc = Jsoup.parse(html, Site.BASE)
@@ -1223,6 +1290,135 @@ object Parse {
             topics = topicCards(doc)
         )
     }
+
+    // ---- 个人设置 ------------------------------------------------------------
+
+    /**
+     * 个人设置, off `/profile`.
+     *
+     * The page reads as one settings form and is five write paths wearing one
+     * coat, so this reads it as five sections. Each one keeps the site's own
+     * wording for its policy - what a 头像 costs, how long between renames -
+     * rather than a copy of the rule, which would go stale silently.
+     *
+     * Null when the page is not the settings page at all: a guest gets the login
+     * form here, and the caller has to be able to tell that apart from a page
+     * whose fields all happened to be empty.
+     */
+    fun accountSettings(html: String): AccountSettings? {
+        val doc = Jsoup.parse(html, Site.PROFILE)
+        val panel = doc.selectFirst(".form-panel:has(.profile-account-grid)") ?: return null
+
+        // 个人资料 is a grid of label/value cards. The last one is the logout
+        // form wearing the same class, so cards holding a form are skipped.
+        val cards = panel.select(".profile-account-card")
+            .filter { it.selectFirst("form") == null }
+            .associate { card ->
+                val value = card.selectFirst("strong")?.let { strong ->
+                    // 邮箱 is Cloudflare-obfuscated: the anchor's text is a
+                    // placeholder and the real address is in the title.
+                    strong.attr("title").ifBlank { strong.text().trim() }
+                }.orEmpty()
+                card.textOf("span") to value
+            }
+
+        val picker = panel.selectFirst(".avatar-picker")
+        val upload = doc.selectFirst("[data-avatar-upload]")
+        val rename = doc.selectFirst("[data-username-change-panel]")
+        val emailCard = doc.selectFirst(".user-review-email-card")
+
+        return AccountSettings(
+            name = cards["用户名"].orEmpty(),
+            uid = cards["用户 UID"].orEmpty(),
+            email = cards["邮箱"].orEmpty(),
+            joinedText = cards["注册时间"].orEmpty(),
+            points = cards["积分"].orEmpty(),
+            avatar = (upload ?: picker)?.selectFirst("img.avatar-img")?.attrUrl("src").orEmpty(),
+            bio = panel.selectFirst("textarea[name=bio]")?.wholeText().orEmpty(),
+            avatarStyles = picker?.select("select[name=avatar_style] option")?.map {
+                it.attr("value") to it.text().trim()
+            }.orEmpty(),
+            avatarStyle = picker?.selectFirst("select[name=avatar_style] option[selected]")
+                ?.attr("value").orEmpty(),
+            avatarSeed = picker?.selectFirst("input[name=avatar_seed]")?.attr("value").orEmpty(),
+            avatarPresets = upload?.select("[data-avatar-preset-seed]")?.mapNotNull { option ->
+                val seed = option.attr("data-avatar-preset-seed")
+                if (seed.isBlank()) null else AvatarPreset(
+                    seed = seed,
+                    url = option.selectFirst("img")?.attrUrl("src").orEmpty()
+                )
+            }.orEmpty(),
+            avatarNote = upload?.textOf("p").orEmpty(),
+            renamePolicy = rename?.textOf("p").orEmpty(),
+            renameNote = rename?.textOf(".username-change-summary-meta small").orEmpty(),
+            // The field, not the sentence: a refusal's wording belongs to the
+            // site, but a missing or disabled input means the same thing in any
+            // wording.
+            renameAllowed = rename?.selectFirst("input[name=new_username]:not([disabled])") != null,
+            emailNote = emailCard?.textOf(".profile-disclosure-heading small").orEmpty(),
+            oauth = doc.select(".oauth-login-profile-card").mapNotNull { card ->
+                val link = card.selectFirst("a[href*=oauth_login]") ?: return@mapNotNull null
+                val provider = queryValue(link.attr("href"), "provider")
+                if (provider.isBlank()) return@mapNotNull null
+                val state = card.textOf(".profile-disclosure-heading small")
+                OAuthBinding(
+                    provider = provider,
+                    label = card.selectFirst(".profile-disclosure-heading > span")?.text()?.trim()
+                        .orEmpty(),
+                    // 已绑定 / 未绑定 is the site's own word for it; the account it
+                    // prints beside that only appears once bound.
+                    bound = state.startsWith("已"),
+                    account = if (state.startsWith("已")) state.removePrefix("已绑定").trim() else "",
+                    href = Site.absolute(link.attr("href")),
+                    action = link.text().trim()
+                )
+            }
+        )
+    }
+
+    /** The main 个人设置 form: 头像 dicebear pick, 简介 and 密码 share one submit. */
+    fun profileForm(doc: Document): SiteForm? =
+        formOf(doc, ".form-panel form:has(textarea[name=bio])")
+
+    /** 改名. Its two fields live outside the form, attached by `form=`. */
+    fun usernameForm(doc: Document): SiteForm? = formOf(doc, "form[action*=username_change]")
+
+    /** 修改邮箱. */
+    fun emailForm(doc: Document): SiteForm? = formOf(doc, "form[action*=user_review_email_change]")
+
+    /**
+     * Where 修改邮箱 asks for its code, read off the button the site put it on.
+     *
+     * Blank when the page renders a native captcha next to it: its answer is
+     * minted in a browser, so the app has to hand that hop over rather than
+     * post a request that cannot pass.
+     */
+    fun emailCodeUrl(doc: Document): String {
+        val button = doc.selectFirst("[data-user-review-send-code]") ?: return ""
+        if (button.closest("form")?.selectFirst("[data-native-captcha]") != null) return ""
+        return Site.absolute(button.attr("data-url"))
+    }
+
+    /**
+     * 头像 upload endpoint and its own token.
+     *
+     * This one is not a form: the panel carries `data-upload-url` and a loose
+     * `_csrf`, and the site's script posts a hand-built FormData at it. So the
+     * two field names it needs - `avatar_upload_action` and the file part's
+     * `avatar` - are named by the caller, from what that script sends.
+     */
+    fun avatarUpload(doc: Document): AvatarUpload? {
+        val panel = doc.selectFirst("[data-avatar-upload]") ?: return null
+        val url = Site.absolute(panel.attr("data-upload-url"))
+        if (url.isBlank()) return null
+        return AvatarUpload(
+            url = url,
+            csrf = panel.selectFirst("input[name=_csrf]")?.attr("value").orEmpty()
+        )
+    }
+
+    /** [avatarUpload]'s answer: where to post a new 头像, and with which token. */
+    data class AvatarUpload(val url: String, val csrf: String)
 
     // ---- 称号馆 ---------------------------------------------------------------
 

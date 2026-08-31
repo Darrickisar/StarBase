@@ -32,6 +32,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Board
+import StarBase.Android.Forum.data.BoardTab
 import StarBase.Android.Forum.data.RankRowData
 import StarBase.Android.Forum.data.TopicCard
 import StarBase.Android.Forum.net.Api
@@ -377,34 +378,71 @@ private fun QuietEntry(entry: DiscoverEntry, modifier: Modifier, onClick: () -> 
 
 // ---- 榜单: the second-level page ---------------------------------------------
 
+/**
+ * 榜单.
+ *
+ * The site serves one 榜单 per page, so a tab switch is a fetch. Boards already
+ * read are kept, which makes going back to one instant and lets the tab strip be
+ * drawn from whichever board is in hand.
+ */
 class RankViewModel : ViewModel() {
-    var state by mutableStateOf<Load<List<Board>>>(Load.Loading)
+    var state by mutableStateOf<Load<Board>>(Load.Loading)
         private set
-    var tab by mutableStateOf(0)
+
+    /** The site's own `type` value; blank until the first page tells us. */
+    var tab by mutableStateOf("")
         private set
     var refreshing by mutableStateOf(false)
         private set
 
     private val fresh = Freshness()
-    private var inFlight = false
+    private val cache = mutableMapOf<String, Board>()
+
+    /** Guarded per tab: switching away must not have its request eaten. */
+    private var inFlight: String? = null
 
     val ageSeconds: Long get() = fresh.ageSeconds
 
-    fun load(force: Boolean = false) {
-        if (state is Load.Ready && !force) return
-        if (inFlight) return
-        inFlight = true
+    /** The tab strip, from the board in hand - every board lists all five. */
+    val tabs: List<BoardTab>
+        get() = (state as? Load.Ready)?.value?.tabs
+            ?: cache.values.firstOrNull()?.tabs
+            ?: emptyList()
+
+    fun load(force: Boolean = false) = fetch(tab, force)
+
+    fun pick(key: String) {
+        if (key == tab && state is Load.Ready) return
+        tab = key
+        // Show the copy we have at once; it is a ranking, not a live figure.
+        cache[key]?.let { state = Load.Ready(it) }
+        fetch(key, force = cache[key] == null)
+    }
+
+    private fun fetch(key: String, force: Boolean) {
+        if (!force && cache[key] != null) {
+            state = Load.Ready(cache.getValue(key))
+            return
+        }
+        if (inFlight == key) return
+        inFlight = key
         viewModelScope.launch {
-            // Keep the board you are reading up while the new one arrives.
             if (state !is Load.Ready) state = Load.Loading else refreshing = true
             try {
-                state = Load.Ready(Api.boards())
-                fresh.mark()
+                val board = Api.board(key)
+                cache[board.key.ifBlank { key }] = board
+                // A late response for a tab the user already left must not be
+                // written to the screen.
+                if (inFlight == key) {
+                    if (tab.isBlank()) tab = board.key
+                    state = Load.Ready(board)
+                    fresh.mark()
+                }
             } catch (e: Throwable) {
-                if (state !is Load.Ready) state = failureOf(e)
+                if (state !is Load.Ready && inFlight == key) state = failureOf(e)
             } finally {
                 refreshing = false
-                inFlight = false
+                if (inFlight == key) inFlight = null
             }
         }
     }
@@ -412,8 +450,6 @@ class RankViewModel : ViewModel() {
     fun refreshIfStale() {
         if (fresh.stale) load(force = true)
     }
-
-    fun pick(index: Int) { tab = index }
 }
 
 @Composable
@@ -434,10 +470,16 @@ fun RankScreen(
             action = "刷新",
             onAction = { vm.load(force = true) }
         )
+        // The tab strip belongs to the page, not to one board's payload: leaving
+        // it up across a fetch is what makes switching feel like a switch rather
+        // than a reload.
+        if (vm.tabs.isNotEmpty()) {
+            BoardTabs(tabs = vm.tabs, current = vm.tab, onPick = vm::pick)
+        }
         when (val s = vm.state) {
             is Load.Loading -> LoadingMark("正在读取榜单")
             is Load.Failed -> ErrorPanel(s.message, s.kind, { vm.load(force = true) }, onLogin)
-            is Load.Ready -> if (s.value.isEmpty()) {
+            is Load.Ready -> if (s.value.rows.isEmpty()) {
                 Column {
                     EmptyPanel("没有读到榜单数据", "网站的排行榜结构可能变了")
                     Row(
@@ -448,32 +490,28 @@ fun RankScreen(
                     }
                 }
             } else {
-                val boards = s.value
-                val current = boards.getOrElse(vm.tab) { boards.first() }
+                val board = s.value
                 LazyColumn {
-                    item("tabs") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = SbMetrics.pagePadding, vertical = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            boards.forEachIndexed { index, board ->
-                                SegmentPill(
-                                    label = board.label.ifBlank { "榜 ${index + 1}" },
-                                    selected = index == vm.tab,
-                                    onClick = { vm.pick(index) }
+                    if (board.subtitle.isNotBlank()) {
+                        item("subtitle") {
+                            Text(
+                                text = board.subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = LocalTokens.current.textTertiary,
+                                modifier = Modifier.padding(
+                                    horizontal = SbMetrics.pagePadding,
+                                    vertical = 2.dp
                                 )
-                            }
+                            )
+                            Gap(8)
                         }
                     }
                     itemsIndexed(
-                        current.rows,
-                        key = { i, r -> "${current.key}-$i-${r.userId}" }
+                        board.rows,
+                        key = { _, r -> "${board.key}-${r.rank}-${r.userId}" }
                     ) { index, row ->
                         if (index > 0) Hairline(startInset = 62)
-                        RankRow(index = index, row = row) { onUser(row.userId) }
+                        RankRow(row = row) { onUser(row.userId) }
                     }
                     item("tail") { Gap(24) }
                 }
@@ -482,13 +520,34 @@ fun RankScreen(
     }
 }
 
+/** The five 榜单 as one scrolling strip. */
 @Composable
-private fun RankRow(index: Int, row: RankRowData, onClick: () -> Unit) {
+private fun BoardTabs(tabs: List<BoardTab>, current: String, onPick: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        tabs.forEach { tab ->
+            SegmentPill(
+                label = tab.label,
+                selected = tab.key == current,
+                onClick = { onPick(tab.key) }
+            )
+        }
+    }
+}
+
+/** One ranked row. The medal colour follows the rank the site gave it. */
+@Composable
+private fun RankRow(row: RankRowData, onClick: () -> Unit) {
     val tokens = LocalTokens.current
-    val medalColor = when (index) {
-        0 -> tokens.hotTint
-        1 -> tokens.accentWarm
-        2 -> tokens.accentDeep
+    val medalColor = when (row.rank) {
+        1 -> tokens.hotTint
+        2 -> tokens.accentWarm
+        3 -> tokens.accentDeep
         else -> tokens.textTertiary
     }
     Row(

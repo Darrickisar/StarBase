@@ -44,7 +44,6 @@ import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
-import StarBase.Android.Forum.data.ThemeMode
 import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Parse
@@ -843,110 +842,6 @@ fun BookmarksScreen(
                     )
                 }
                 item("tail") { Gap(24) }
-            }
-        }
-    }
-}
-
-// ---- 个人设置 ----------------------------------------------------------------
-
-@Composable
-fun SettingsScreen(
-    store: UserStore,
-    signedIn: Boolean,
-    onBack: () -> Unit,
-    onLogin: () -> Unit,
-    onSignOut: () -> Unit,
-    onOpenSite: (String) -> Unit
-) {
-    val tokens = LocalTokens.current
-    Column(modifier = Modifier.fillMaxWidth()) {
-        DetailBar(title = "个人设置", onBack = onBack)
-        LazyColumn {
-            item("theme") {
-                Gap(12)
-                SbCard(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
-                    padding = 14.dp
-                ) {
-                    Text(
-                        text = "主题外观",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = tokens.textPrimary
-                    )
-                    Gap(10)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ThemeMode.entries.forEach { mode ->
-                            SegmentPill(
-                                label = mode.label,
-                                selected = store.themeMode == mode,
-                                onClick = { store.updateTheme(mode) }
-                            )
-                        }
-                    }
-                }
-            }
-
-            item("local") {
-                Gap(14)
-                SbCard(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
-                    padding = 14.dp
-                ) {
-                    Text(
-                        text = "本机数据",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = tokens.textPrimary
-                    )
-                    Gap(6)
-                    Text(
-                        text = "收藏 ${store.bookmarks.size} 条 · 浏览历史 ${store.history.size} 条。" +
-                            "这两项只存在这台手机上。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = tokens.textSecondary
-                    )
-                    Gap(14)
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        SmallAction("清空收藏", primary = false, onClick = store::clearBookmarks)
-                        SmallAction("清空历史", primary = false, onClick = store::clearHistory)
-                    }
-                }
-            }
-
-            item("account") {
-                Gap(14)
-                SbCard(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
-                    padding = 14.dp
-                ) {
-                    Text(
-                        text = "账号",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = tokens.textPrimary
-                    )
-                    Gap(6)
-                    Text(
-                        text = if (signedIn) {
-                            "资料、密码、邮箱等设置由网站页面处理，App 不保存这些内容。"
-                        } else {
-                            "登录后可以在这里进入网站的账号设置。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = tokens.textSecondary
-                    )
-                    Gap(14)
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (signedIn) {
-                            SmallAction("网站设置", primary = true) {
-                                onOpenSite("${Site.BASE}/settings")
-                            }
-                            SmallAction("退出登录", primary = false, onClick = onSignOut)
-                        } else {
-                            SmallAction("登录", primary = true, onClick = onLogin)
-                        }
-                    }
-                }
-                Gap(28)
             }
         }
     }

@@ -93,6 +93,54 @@ class ParseTest {
         assertTrue("expected at least one hot row", topics.any { it.hot })
     }
 
+    // ---- title-row marks -----------------------------------------------------
+
+    /**
+     * 精华 rides its own class, not the `.topic-stamp-badge` the other marks use,
+     * so it went unread until the selector below was added.
+     */
+    @Test
+    fun featuredRowsAreFlagged() {
+        val topics = Parse.home(fixture("home.html")).topics
+        assertTrue("expected featured rows", topics.any { it.featured })
+
+        val featured = topics.first { it.id == 17748 }
+        assertTrue("17748 must be featured", featured.featured)
+        assertFalse("17748 carries no 热 badge", featured.hot)
+        assertFalse("17748 is not pinned", featured.pinned)
+    }
+
+    /** 置顶 is a class on the li plus its own badge - never a `.topic-stamp-*`. */
+    @Test
+    fun pinnedRowsAreFlagged() {
+        val topics = Parse.home(fixture("home.html")).topics
+        assertEquals(3, topics.count { it.pinned })
+
+        val pinned = topics.first { it.id == 17536 }
+        assertTrue("17536 is pinned", pinned.pinned)
+        assertTrue("17536 is also hot", pinned.hot)
+    }
+
+    /**
+     * Each mark is drawn from its own flag, so leaving it in the free stamp text
+     * as well is what made a row show 热 twice.
+     */
+    @Test
+    fun stampTextHoldsOnlyTheWordierStatuses() {
+        val topics = Parse.home(fixture("home.html")).topics
+        topics.forEach {
+            assertFalse("热 belongs to hot, not stampText: $it", it.stampText.contains("热"))
+            assertFalse("置顶 belongs to pinned: $it", it.stampText.contains("置顶"))
+            assertFalse("精华 belongs to featured: $it", it.stampText.contains("精华"))
+        }
+        // 抽奖中 / 发卡中 still come through, since nothing else carries them.
+        assertTrue(
+            "expected a lottery/card status to survive",
+            topics.any { it.stampText.isNotBlank() }
+        )
+        assertEquals("抽奖中", topics.first { it.id == 17734 }.stampText)
+    }
+
     // ---- topic page ----------------------------------------------------------
 
     @Test
@@ -1086,6 +1134,219 @@ class ParseTest {
         val me = checkNotNull(Parse.home(noBadge).me)
         assertEquals("", me.rank)
         assertEquals("积分 110", me.points)
+    }
+
+    // ---- 个人设置 ------------------------------------------------------------
+
+    /** 个人资料 is a grid of label/value cards, and one of them is the logout form. */
+    @Test
+    fun accountSettingsReadsTheProfileCards() {
+        val s = checkNotNull(Parse.accountSettings(fixture("profile.html")))
+        assertEquals("轩辕", s.name)
+        assertEquals("7699", s.uid)
+        assertEquals("2026-08-08 22:28", s.joinedText)
+        assertEquals("1218", s.points)
+        // The 安全退出 card wears the same class as the rest; it is not a field.
+        assertFalse("logout must not read as a card: $s", s.name.contains("退出"))
+    }
+
+    /**
+     * 邮箱 is Cloudflare-obfuscated: the anchor's text is a placeholder and the
+     * address is in the `title` of the strong around it, so reading the text
+     * yields 「[email protected]」.
+     */
+    @Test
+    fun accountSettingsReadsTheEmailPastCloudflareObfuscation() {
+        val email = checkNotNull(Parse.accountSettings(fixture("profile.html"))).email
+        assertTrue("expected a real address, got $email", email.contains("@"))
+        assertFalse("must not be the placeholder: $email", email.contains("protected"))
+    }
+
+    /** 头像 has three offers on this page: dicebear style, seed, and presets. */
+    @Test
+    fun accountSettingsReadsTheAvatarOffers() {
+        val s = checkNotNull(Parse.accountSettings(fixture("profile.html")))
+        assertEquals(listOf("", "fun-emoji"), s.avatarStyles.map { it.first })
+        assertEquals("Fun Emoji", s.avatarStyles.last().second)
+        assertEquals("fun-emoji", s.avatarStyle)
+        assertEquals("19", s.avatarSeed)
+        assertEquals(48, s.avatarPresets.size)
+        assertEquals("1", s.avatarPresets.first().seed)
+        assertTrue("preset art must be absolute", s.avatarPresets.all { it.url.startsWith("http") })
+        assertTrue("expected the site's own cost note: ${s.avatarNote}", s.avatarNote.contains("50"))
+        assertTrue("current avatar must be absolute: ${s.avatar}", s.avatar.startsWith("http"))
+    }
+
+    /** 简介 and the 改名 policy are the site's own text, carried through as-is. */
+    @Test
+    fun accountSettingsCarriesTheSitesOwnPolicyText() {
+        val s = checkNotNull(Parse.accountSettings(fixture("profile.html")))
+        assertEquals("", s.bio)
+        assertTrue("改名 policy: ${s.renamePolicy}", s.renamePolicy.contains("100 积分"))
+        assertEquals("现在可以修改", s.renameNote)
+        assertTrue("the field is there, so renaming is allowed", s.renameAllowed)
+        assertEquals("需要新邮箱验证码", s.emailNote)
+    }
+
+    /** 第三方登录: two rows, each an ordinary link the app can just follow. */
+    @Test
+    fun accountSettingsReadsBothOAuthRows() {
+        val oauth = checkNotNull(Parse.accountSettings(fixture("profile.html"))).oauth
+        assertEquals(listOf("github", "google"), oauth.map { it.provider })
+        assertEquals("GitHub 登录", oauth.first().label)
+        // The button says what the site's own link says.
+        assertEquals("绑定", oauth.first().action)
+        oauth.forEach {
+            assertFalse("nothing is bound on this capture: $it", it.bound)
+            assertEquals("", it.account)
+            assertTrue("bind link must be absolute: $it", it.href.startsWith("https://"))
+        }
+    }
+
+    /** A guest is handed the login page here, and that is not empty settings. */
+    @Test
+    fun accountSettingsIsNullForAPageThatIsNotTheSettingsPage() {
+        assertNull(Parse.accountSettings(fixture("login.html")))
+        assertNull(Parse.accountSettings(fixture("home.html")))
+    }
+
+    /**
+     * 改名's two fields are attached to its form by the HTML5 `form=` attribute
+     * and are not inside it, so a reader that only walks the form's own subtree
+     * posts a rename carrying nothing but a token.
+     */
+    @Test
+    fun formOfCollectsFieldsAttachedByTheFormAttribute() {
+        val doc = org.jsoup.Jsoup.parse(fixture("profile.html"), "https://linux.sb/profile")
+        val form = checkNotNull(Parse.usernameForm(doc))
+        assertEquals("https://linux.sb/username_change", form.action)
+        assertTrue("post", form.post)
+        assertTrue("_csrf", form.fields.containsKey("_csrf"))
+        assertTrue("new_username: ${form.fields.keys}", form.fields.containsKey("new_username"))
+        assertTrue("current_password: ${form.fields.keys}", form.fields.containsKey("current_password"))
+    }
+
+    /**
+     * The other side of the same rule: a field that declares another form's id
+     * does not belong to the form it happens to sit inside. 改名's fields sit
+     * inside the main 个人设置 form, so without this the profile save would post
+     * a rename along with it.
+     */
+    @Test
+    fun formOfLeavesOutFieldsThatPointAtAnotherForm() {
+        val doc = org.jsoup.Jsoup.parse(fixture("profile.html"), "https://linux.sb/profile")
+        val form = checkNotNull(Parse.profileForm(doc))
+        assertEquals("https://linux.sb/profile", form.action)
+        assertEquals(
+            listOf("_csrf", "avatar_style", "avatar_seed", "bio", "password", "password2"),
+            form.fields.keys.toList()
+        )
+        // The textarea is the body field of this form, and it is 简介.
+        assertEquals("bio", form.bodyField)
+    }
+
+    /** 修改邮箱 and its code endpoint, both read off the page rather than named. */
+    @Test
+    fun emailFormAndCodeEndpointComeOffThePage() {
+        val doc = org.jsoup.Jsoup.parse(fixture("profile.html"), "https://linux.sb/profile")
+        val form = checkNotNull(Parse.emailForm(doc))
+        assertEquals("https://linux.sb/user_review_email_change", form.action)
+        assertEquals(listOf("_csrf", "email", "email_code"), form.fields.keys.toList())
+        assertEquals("https://linux.sb/user_review_email_code", Parse.emailCodeUrl(doc))
+    }
+
+    /**
+     * 头像上传 is not a form at all - the panel carries the endpoint and a loose
+     * `_csrf`, and the site's own script builds the body by hand.
+     */
+    @Test
+    fun avatarUploadTargetComesOffThePanel() {
+        val doc = org.jsoup.Jsoup.parse(fixture("profile.html"), "https://linux.sb/profile")
+        val target = checkNotNull(Parse.avatarUpload(doc))
+        assertEquals("https://linux.sb/avatar_upload", target.url)
+        assertEquals(64, target.csrf.length)
+    }
+
+    /** A native captcha cannot be answered natively, so the app must not try. */
+    @Test
+    fun emailCodeEndpointIsWithheldWhenTheSiteAsksForACaptcha() {
+        val guarded = fixture("profile.html").replace(
+            "<button type=\"button\" data-user-review-send-code",
+            "<div data-native-captcha></div><button type=\"button\" data-user-review-send-code"
+        )
+        val doc = org.jsoup.Jsoup.parse(guarded, "https://linux.sb/profile")
+        assertEquals("", Parse.emailCodeUrl(doc))
+    }
+
+    // ---- 榜单 -----------------------------------------------------------------
+
+    /**
+     * The board that shipped read nothing at all: it looked for rows as `li` or
+     * `tr`, and the site renders each one as `<a class="leaderboard-item">`.
+     */
+    @Test
+    fun boardReadsPodiumAndList() {
+        val board = Parse.board(fixture("leaderboard.html"))
+
+        assertEquals("points", board.key)
+        assertEquals("富豪榜", board.label)
+        assertEquals("按积分排行", board.subtitle)
+        // Three on the podium, seventeen in the list.
+        assertEquals(20, board.rows.size)
+
+        val first = board.rows.first()
+        assertEquals(1, first.rank)
+        assertEquals("流彩猫", first.name)
+        assertEquals(12010, first.userId)
+        assertEquals("创作者", first.group)
+        assertEquals("9.6万 积分", first.count)
+        assertTrue("avatar must be absolute: ${first.avatar}", first.avatar.startsWith("http"))
+    }
+
+    /**
+     * The podium's DOM order is 2-1-3, so a reader that trusts document order
+     * crowns the runner-up. Its own step number is the only rank to believe.
+     */
+    @Test
+    fun podiumOrderComesFromTheStepNotTheDom() {
+        val rows = Parse.board(fixture("leaderboard-checkin.html")).rows
+        assertEquals(listOf("痛失姓名的站长", "明明下落不明", "X"), rows.take(3).map { it.name })
+        assertEquals(listOf(1, 2, 3), rows.take(3).map { it.rank })
+    }
+
+    /** The list picks up at 4 - the podium already took the first three. */
+    @Test
+    fun boardRanksRunUnbrokenFromOne() {
+        val rows = Parse.board(fixture("leaderboard.html")).rows
+        assertEquals((1..rows.size).toList(), rows.map { it.rank })
+    }
+
+    /**
+     * Each 榜单 is its own page, so the tab strip is the only way to reach the
+     * other four and every page has to carry all five.
+     */
+    @Test
+    fun everyBoardListsAllFiveTabs() {
+        listOf("leaderboard.html", "leaderboard-checkin.html").forEach { name ->
+            val board = Parse.board(fixture(name))
+            assertEquals(
+                "tabs of $name",
+                listOf("points", "replies", "topics", "checkin", "donation"),
+                board.tabs.map { it.key }
+            )
+            assertEquals("打赏榜", board.tabs.last().label)
+            assertTrue("$name must name its own tab", board.tabs.any { it.key == board.key })
+        }
+    }
+
+    /** `?type=` really switches the page - the app fetches per tab, not filters. */
+    @Test
+    fun boardKeyFollowsTheActiveTab() {
+        val checkin = Parse.board(fixture("leaderboard-checkin.html"))
+        assertEquals("checkin", checkin.key)
+        assertEquals("签到榜", checkin.label)
+        assertEquals("按累计签到天数排行", checkin.subtitle)
+        assertEquals("25 次", checkin.rows.first().count)
     }
 
     /** 访客 sidebars must stay signed-out even though they also carry .user-rank. */

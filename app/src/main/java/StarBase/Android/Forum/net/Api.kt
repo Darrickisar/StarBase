@@ -9,6 +9,7 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.jsoup.Jsoup
+import StarBase.Android.Forum.data.AccountSettings
 import StarBase.Android.Forum.data.Board
 import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.ForumPage
@@ -101,19 +102,7 @@ object Api {
         form: Parse.SiteForm,
         values: Map<String, String>,
         whatFailed: String
-    ): Parse.WriteResult {
-        val fields = form.with(*values.toList().toTypedArray())
-        val body: okhttp3.RequestBody = if (form.multipart) {
-            MultipartBody.Builder().setType(MultipartBody.FORM).apply {
-                fields.forEach { (name, value) -> addFormDataPart(name, value) }
-            }.build()
-        } else {
-            FormBody.Builder().apply {
-                fields.forEach { (name, value) -> add(name, value) }
-            }.build()
-        }
-        return writeResult(Net.postBody(form.action, body), whatFailed)
-    }
+    ): Parse.WriteResult = writeResult(post(form, values, ajax = true), whatFailed)
 
     suspend fun home(page: Int = 1): HomePage = io {
         val url = if (page > 1) "${Site.BASE}/?p=$page" else "${Site.BASE}/"
@@ -207,8 +196,18 @@ object Api {
         Parse.gachaResult(html)
     }
 
-    suspend fun boards(): List<Board> = io {
-        Parse.boards(Net.getText("${Site.BASE}/leaderboard"))
+    /**
+     * One 榜单. Each is its own page, so switching tabs is a fetch, not a filter
+     * over something already in hand - [type] is the site's own query value and
+     * an empty one asks for the default (富豪榜).
+     */
+    suspend fun board(type: String = ""): Board = io {
+        val url = if (type.isBlank()) {
+            "${Site.BASE}/leaderboard"
+        } else {
+            "${Site.BASE}/leaderboard?type=$type"
+        }
+        Parse.board(Net.getText(url))
     }
 
     /**
@@ -584,5 +583,191 @@ object Api {
             // changed its markup, and a WebView can still do the job.
             else -> NeedsBrowser(Site.topic(topicId), "找不到回复表单，用网页方式回复")
         }
+    }
+
+    // ---- 个人设置 ------------------------------------------------------------
+
+    /**
+     * Reads the answer to a form the site posts as an ordinary page load.
+     *
+     * /profile, /username_change and /user_review_email_change are not ajax
+     * endpoints - this site has no global submit hijack, only per-widget
+     * handlers - so [writeResult]'s JSON contract does not apply to them. What
+     * comes back is the settings page again, which offers the strongest
+     * confirmation there is: the state that is now stored. A refusal renders the
+     * site's 「消息」 panel instead, and that is an error.
+     */
+    private fun settingsOf(html: String, whatFailed: String): AccountSettings {
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("登录状态已失效，请重新登录", SiteException.Kind.AUTH)
+        }
+        return Parse.accountSettings(html) ?: throw SiteException(
+            "$whatFailed：站点没有按预期回应，可能是版面改版了",
+            SiteException.Kind.PARSE
+        )
+    }
+
+    /** The settings page as a document, with refusals and guests already thrown. */
+    private fun settingsDoc(): org.jsoup.nodes.Document {
+        val html = Net.getText(Site.PROFILE)
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("请登录后修改个人设置", SiteException.Kind.AUTH)
+        }
+        return Jsoup.parse(html, Site.PROFILE)
+    }
+    /**
+     * Fails loudly when a field we are about to write is not on the form.
+     *
+     * The standing rule here is that field names come from the markup. These
+     * sections have to name a few anyway - only the caller knows which value is
+     * the new 简介 and which is the new 密码 - so the compromise is to check
+     * first: a renamed field stops the write, instead of posting to a handler
+     * that ignores it and answers 200.
+     */
+    private fun requireFields(form: Parse.SiteForm, names: Collection<String>, what: String) {
+        val missing = names.filterNot { form.fields.containsKey(it) }
+        if (missing.isNotEmpty()) {
+            throw SiteException(
+                "$what 的表单少了 ${missing.joinToString("、")}，可能是版面改版了",
+                SiteException.Kind.PARSE
+            )
+        }
+    }
+
+    /** Posts a form read off a page and hands back the raw body. */
+    private fun post(form: Parse.SiteForm, values: Map<String, String>, ajax: Boolean): String {
+        val fields = form.with(*values.toList().toTypedArray())
+        val body: okhttp3.RequestBody = if (form.multipart) {
+            MultipartBody.Builder().setType(MultipartBody.FORM).apply {
+                fields.forEach { (name, value) -> addFormDataPart(name, value) }
+            }.build()
+        } else {
+            FormBody.Builder().apply {
+                fields.forEach { (name, value) -> add(name, value) }
+            }.build()
+        }
+        return Net.postBody(form.action, body, ajax = ajax)
+    }
+
+    suspend fun accountSettings(): AccountSettings = io {
+        settingsOf(Net.getText(Site.PROFILE), "读取个人设置失败")
+    }
+    /**
+     * Saves 简介 / 头像样式 / 密码.
+     *
+     * All three share one form and one 保存 button on the site, so a save that
+     * only touches 简介 posts the avatar fields and the password pair back as
+     * well. A null argument means "leave what the page had", which is exactly
+     * what submitting the untouched form does - so nothing here has to know the
+     * current value.
+     */
+    suspend fun saveProfile(
+        bio: String? = null,
+        avatarStyle: String? = null,
+        avatarSeed: String? = null,
+        password: String? = null
+    ): AccountSettings = io {
+        val form = Parse.profileForm(settingsDoc())
+            ?: throw SiteException("找不到个人设置表单，可能是版面改版了", SiteException.Kind.PARSE)
+
+        val values = LinkedHashMap<String, String>()
+        bio?.let { values["bio"] = it }
+        avatarStyle?.let { values["avatar_style"] = it }
+        avatarSeed?.let { values["avatar_seed"] = it }
+        // The site validates the pair and refuses a mismatch, so both halves
+        // carry the same value rather than being asked for twice.
+        password?.let {
+            values["password"] = it
+            values["password2"] = it
+        }
+        requireFields(form, values.keys, "个人设置")
+
+        settingsOf(post(form, values, ajax = false), "保存失败")
+    }
+
+    /**
+     * 改名. It costs points, so the site asks for the current password too.
+     *
+     * The form this posts holds nothing but its `_csrf`: both fields are attached
+     * from outside by the HTML5 `form=` attribute, which is why [Parse.formOf]
+     * had to learn about that attribute before this could work at all.
+     */
+    suspend fun changeUsername(newName: String, currentPassword: String): AccountSettings = io {
+        val form = Parse.usernameForm(settingsDoc())
+            ?: throw SiteException("找不到改名表单，可能是版面改版了", SiteException.Kind.PARSE)
+        val values = mapOf("new_username" to newName.trim(), "current_password" to currentPassword)
+        requireFields(form, values.keys, "改名")
+        settingsOf(post(form, values, ajax = false), "改名失败")
+    }
+    /**
+     * Asks for the code 修改邮箱 needs.
+     *
+     * Its own endpoint, and the one part of 个人设置 that really does answer JSON -
+     * the site's script posts it with fetch and reads `ok` / `message`.
+     */
+    suspend fun sendEmailCode(email: String): String = io {
+        val doc = settingsDoc()
+        val url = Parse.emailCodeUrl(doc)
+        if (url.isBlank()) {
+            throw NeedsBrowser(Site.PROFILE, "发送验证码需要人机验证，用网页方式修改邮箱")
+        }
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("_csrf", Parse.csrfOf(doc))
+            .addFormDataPart("email", email.trim())
+            .build()
+        writeResult(Net.postBody(url, body), "发送验证码失败").message.ifBlank { "验证码已发送" }
+    }
+
+    suspend fun changeEmail(email: String, code: String): AccountSettings = io {
+        val form = Parse.emailForm(settingsDoc())
+            ?: throw SiteException("找不到修改邮箱表单，可能是版面改版了", SiteException.Kind.PARSE)
+        val values = mapOf("email" to email.trim(), "email_code" to code.trim())
+        requireFields(form, values.keys, "修改邮箱")
+        settingsOf(post(form, values, ajax = false), "修改邮箱失败")
+    }
+
+    /**
+     * Switches to one of the site's 预置头像.
+     *
+     * Not a form: the panel carries the endpoint and a loose `_csrf`, and the
+     * site's script builds the body by hand - so these two field names come from
+     * that script rather than from any markup. It answers JSON and then reloads
+     * the page, so this re-reads it for the state that came of it.
+     */
+    suspend fun pickAvatarPreset(seed: String): AccountSettings = io {
+        val target = Parse.avatarUpload(settingsDoc())
+            ?: throw SiteException("找不到头像上传入口，可能是版面改版了", SiteException.Kind.PARSE)
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("_csrf", target.csrf)
+            .addFormDataPart("avatar_upload_action", "preset")
+            .addFormDataPart("avatar_seed", seed)
+            .build()
+        writeResult(Net.postBody(target.url, body), "更换头像失败")
+        settingsOf(Net.getText(Site.PROFILE), "更换头像失败")
+    }
+
+    /**
+     * Uploads a 头像.
+     *
+     * [jpeg] has to be the square the site stores already - its own page crops to
+     * 200×200 in a canvas before posting and the handler is written for what that
+     * produces. Scaling is the caller's job; this only carries the bytes.
+     */
+    suspend fun uploadAvatar(jpeg: ByteArray): AccountSettings = io {
+        val target = Parse.avatarUpload(settingsDoc())
+            ?: throw SiteException("找不到头像上传入口，可能是版面改版了", SiteException.Kind.PARSE)
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("_csrf", target.csrf)
+            .addFormDataPart("avatar_upload_action", "upload")
+            .addFormDataPart(
+                "avatar",
+                "avatar.jpg",
+                jpeg.toRequestBody("image/jpeg".toMediaTypeOrNull())
+            )
+            .build()
+        writeResult(Net.postBody(target.url, body), "上传头像失败")
+        settingsOf(Net.getText(Site.PROFILE), "上传头像失败")
     }
 }

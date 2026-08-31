@@ -33,6 +33,13 @@ data class TopicCard(
     val timeText: String = "",
     val pinned: Boolean = false,
     val hot: Boolean = false,
+    /** 精华: the site's `topic-management-featured-badge` on the title row. */
+    val featured: Boolean = false,
+    /**
+     * Any remaining title-row status the site words itself - 抽奖中 / 发卡中.
+     * 置顶 / 精华 / 热 are excluded: they have their own flags above, and drawing
+     * them here as well is what made a row show 热 twice.
+     */
     val stampText: String = "",
     /** 回帖 rows carry what was written; every other list leaves this blank. */
     val excerpt: String = ""
@@ -171,6 +178,62 @@ data class Me(
     val title: Title? = null
 )
 
+/**
+ * 个人设置, read off `/profile`.
+ *
+ * The page looks like one settings form and is actually five write paths with
+ * five different addresses, so this carries what each section needs to draw
+ * itself - and, for the parts the site prints its own policy for (头像 cost,
+ * 改名 interval), that wording rather than a copy of the rule.
+ */
+data class AccountSettings(
+    val name: String = "",
+    val uid: String = "",
+    val email: String = "",
+    val joinedText: String = "",
+    val points: String = "",
+    val avatar: String = "",
+    val bio: String = "",
+    /** dicebear styles the avatar picker offers, as value → label. */
+    val avatarStyles: List<Pair<String, String>> = emptyList(),
+    val avatarStyle: String = "",
+    val avatarSeed: String = "",
+    /** 预置头像 the upload panel offers. */
+    val avatarPresets: List<AvatarPreset> = emptyList(),
+    /** The site's own sentence about what changing a 头像 costs. */
+    val avatarNote: String = "",
+    /** 改名 policy the site prints under the field - cost, interval, balance. */
+    val renamePolicy: String = "",
+    /** 「现在可以修改」, or whatever wait the site prints in its place. */
+    val renameNote: String = "",
+    /**
+     * False when the site did not render a usable 新用户名 field - which is how it
+     * says the interval has not elapsed. Read from the field rather than from
+     * [renameNote], because the wording of a refusal is the site's to change.
+     */
+    val renameAllowed: Boolean = true,
+    /** 修改邮箱's own one-line hint. */
+    val emailNote: String = "",
+    val oauth: List<OAuthBinding> = emptyList()
+)
+
+/** One 预置头像 offer: the seed to post, and the picture to draw for it. */
+data class AvatarPreset(val seed: String, val url: String)
+
+/** One 第三方登录 row: GitHub or Google, bound or not. */
+data class OAuthBinding(
+    /** `github` / `google`, taken from the link's own query. */
+    val provider: String,
+    val label: String,
+    val bound: Boolean,
+    /** The account shown next to it once bound; blank while it is not. */
+    val account: String = "",
+    /** The site's own bind/unbind link, followed as-is. */
+    val href: String = "",
+    /** That link's own label - 「绑定」/「解绑」 - so the button says what it does. */
+    val action: String = ""
+)
+
 /** One row of any leaderboard. */
 data class RankRowData(
     val rank: Int,
@@ -181,10 +244,26 @@ data class RankRowData(
     val count: String = ""
 )
 
-/** A leaderboard, keyed by the tab it sits under. */
+/** One of the site's five 榜单, as a tab you can switch to. */
+data class BoardTab(
+    /** The site's own `type` query value: points / replies / topics / checkin / donation. */
+    val key: String,
+    val label: String
+)
+
+/**
+ * One leaderboard.
+ *
+ * The site serves each 榜单 as its own page (`/leaderboard?type=…`), not as
+ * several panels on one page, so a Board is a whole page and [tabs] is how to
+ * reach the other four.
+ */
 data class Board(
     val key: String,
     val label: String,
+    /** 「按积分排行」 and friends - the site's own one-line description. */
+    val subtitle: String = "",
+    val tabs: List<BoardTab> = emptyList(),
     val rows: List<RankRowData> = emptyList()
 )
 
