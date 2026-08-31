@@ -307,7 +307,10 @@ fun AuthScreen(
             javaScriptEnabled = true          // the captcha and the PoW are JS
             domStorageEnabled = true
             userAgentString = Net.userAgent()
-            cacheMode = WebSettings.LOAD_DEFAULT
+            // Never a cached login page: its _csrf, its arithmetic captcha and
+            // its proof-of-work challenge are all one-shot, and a page replayed
+            // from cache submits tokens the server has already retired.
+            cacheMode = WebSettings.LOAD_NO_CACHE
             loadWithOverviewMode = true
             useWideViewPort = true
             allowFileAccess = false

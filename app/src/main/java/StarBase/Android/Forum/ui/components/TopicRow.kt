@@ -327,45 +327,6 @@ fun RankedTopicRow(
     }
 }
 
-/** A compact row used by 收藏 / 浏览历史, where only the id and a title exist. */
-@Composable
-fun SimpleTopicRow(
-    title: String,
-    subtitle: String = "",
-    trailing: String = "",
-    onClick: () -> Unit
-) {
-    val tokens = LocalTokens.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = SbMetrics.pagePadding, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium,
-                color = tokens.textPrimary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (subtitle.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                MetaText(subtitle)
-            }
-        }
-        if (trailing.isNotBlank()) {
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = trailing,
-                style = MaterialTheme.typography.labelMedium,
-                color = tokens.textTertiary
-            )
-        }
-    }
-}
 
 /** Horizontal spacing helper used by row-heavy layouts. */
 @Composable

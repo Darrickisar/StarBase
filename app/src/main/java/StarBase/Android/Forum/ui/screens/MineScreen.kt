@@ -26,8 +26,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import StarBase.Android.Forum.data.Me
-import StarBase.Android.Forum.data.ThemeMode
-import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.ui.Gap
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.PageHead
@@ -40,7 +38,6 @@ import StarBase.Android.Forum.ui.glass.GlassButton
 import StarBase.Android.Forum.ui.glass.GlassChip
 import StarBase.Android.Forum.ui.glass.GlassLevel
 import StarBase.Android.Forum.ui.glass.GlassPanel
-import StarBase.Android.Forum.ui.glass.GlassTabs
 import StarBase.Android.Forum.ui.glass.GlyphTile
 import StarBase.Android.Forum.ui.glass.pressFeedback
 import StarBase.Android.Forum.ui.theme.LocalTokens
@@ -51,10 +48,10 @@ import StarBase.Android.Forum.ui.theme.SbRadius
  * §04 我的页 (个人控制台).
  *
  * Same eight entries as before, but they stop being a tall stack of full-width
- * rows: 身份卡 carries 登录/注册 for guests, 我的内容 becomes one continuous glass
- * panel holding a 4 x 2 matrix, 外观 shrinks to a two-option segmented control,
- * and 关于 closes the page. The point of §04 is that most of the page is visible
- * without scrolling.
+ * rows: 身份卡 carries 登录/注册 for guests, and 我的内容 becomes one continuous
+ * glass panel holding a 4 x 2 matrix. Below it sits the one row that is not
+ * forum content - 应用设置, which now holds 外观, 关于 and the update check. The
+ * point of §04 is that most of the page is visible without scrolling.
  */
 
 /** Everything reachable from 我的. */
@@ -73,12 +70,13 @@ enum class MineEntry(val label: String, val glyph: String) {
 fun MineScreen(
     me: Me?,
     checking: Boolean,
-    store: UserStore,
     onEntry: (MineEntry) -> Unit,
+    onAppSettings: () -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
     onProfile: (Int) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    updateReady: Boolean = false
 ) {
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
         item("head") {
@@ -104,25 +102,11 @@ fun MineScreen(
             EntryMatrix(onEntry = onEntry)
         }
 
-        item("appearance") {
-            Gap(20)
-            SectionHeader(title = "外观", subtitle = "只保存在本机")
+        item("app") {
+            Gap(18)
+            SectionHeader(title = "本机", subtitle = "不需要登录")
             Gap(10)
-            // §4.3: two options, one short segmented control, nothing else.
-            val modes = ThemeMode.entries
-            GlassTabs(
-                labels = modes.map { it.label },
-                selected = modes.indexOf(store.themeMode).coerceAtLeast(0),
-                onSelect = { index -> store.updateTheme(modes[index]) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = SbMetrics.pagePadding)
-            )
-        }
-
-        item("about") {
-            Gap(20)
-            AboutPanel()
+            AppSettingsRow(updateReady = updateReady, onClick = onAppSettings)
             Gap(28)
         }
     }
@@ -343,26 +327,51 @@ private fun EntryCell(
     }
 }
 
-/** §4.4 关于: stays at the very end of the page. */
+/**
+ * §4.4 应用设置: the one row on this page that is not linux.sb content. It is the
+ * whole width, unlike the eight cells above, because it is a different kind of
+ * thing - and it works signed out, since nothing behind it needs a session.
+ */
 @Composable
-private fun AboutPanel() {
+private fun AppSettingsRow(updateReady: Boolean, onClick: () -> Unit) {
     val tokens = LocalTokens.current
     GlassPanel(
         modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+        onClick = onClick,
         level = GlassLevel.LOW,
-        padding = 14.dp
+        padding = 12.dp
     ) {
-        Text(
-            text = "关于",
-            style = MaterialTheme.typography.titleSmall,
-            color = tokens.textPrimary
-        )
-        Gap(6)
-        Text(
-            text = "烧饼社区的第三方 Android 客户端，内容实时来自 linux.sb。" +
-                "登录表单由网站自己处理，App 不保存你的密码。",
-            style = MaterialTheme.typography.bodySmall,
-            color = tokens.textSecondary
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            GlyphTile(glyph = "用", size = 34.dp)
+            Spacer(Modifier.width(11.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "应用设置",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = tokens.textPrimary,
+                        maxLines = 1
+                    )
+                    if (updateReady) {
+                        Spacer(Modifier.width(7.dp))
+                        GlassChip(text = "新版本", tint = tokens.accentGlow)
+                    }
+                }
+                Gap(3)
+                Text(
+                    text = "检查更新 · 外观 · 本机数据 · 关于",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.titleSmall,
+                color = tokens.textTertiary.copy(alpha = 0.6f)
+            )
+        }
     }
 }

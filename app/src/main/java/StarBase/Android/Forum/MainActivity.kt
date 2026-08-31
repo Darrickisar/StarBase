@@ -12,10 +12,11 @@ import StarBase.Android.Forum.ui.theme.StarBaseTheme
 /**
  * The only Activity. Everything else is Compose.
  *
- * The app is a live client: nothing is bundled, every screen reads linux.sb when
- * it is opened. The only state that lives on the device is in [UserStore] - the
- * theme, local bookmarks and read history - and the session cookie, which the
- * WebView owns.
+ * The app is a live client: nothing is bundled and nothing is cached, so every
+ * screen reads linux.sb when it is opened. The only state that lives on the
+ * device is in [UserStore] - the appearance, the update-check schedule and the
+ * last release tag seen - and the session cookie, which the WebView owns. No
+ * post, list or profile is ever written to disk.
  */
 class MainActivity : ComponentActivity() {
 

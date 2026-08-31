@@ -41,6 +41,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.TopicDetail
 import StarBase.Android.Forum.net.Api
@@ -106,6 +107,16 @@ class TopicViewModel : ViewModel() {
      * form, or markup we no longer recognise. The screen opens the site page.
      */
     var browserReply by mutableStateOf("")
+        private set
+
+    /**
+     * 收藏 as the loaded page rendered it, plus a flag while the flip is in
+     * flight. Nothing is kept locally: the state that shows here came from the
+     * site, and the answer to a tap replaces it with the site's new one.
+     */
+    var favorite by mutableStateOf<FavoriteMark?>(null)
+        private set
+    var favoriting by mutableStateOf(false)
         private set
 
     /** The post whose 点赞 amount is being chosen, or null when none is. */
@@ -175,6 +186,7 @@ class TopicViewModel : ViewModel() {
         topicPresets = emptyList()
         topicDonateInfo = ""
         notice = ""
+        favorite = null
 
         fresh.invalidate()
         load(initial = true)
@@ -202,6 +214,9 @@ class TopicViewModel : ViewModel() {
                 comments += detail.comments
                 lastPage = detail.lastPage
                 state = Load.Ready(detail)
+                // Whatever the page just said about 收藏 wins - including a
+                // change made on the website while this screen sat open.
+                favorite = detail.favorite
                 fresh.mark()
             } catch (e: Throwable) {
                 if (requested != topicId) return@launch
@@ -410,6 +425,38 @@ class TopicViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Flips 收藏 on the site.
+     *
+     * The button's next state is whatever the site answers with, so a tap that
+     * the server refuses leaves the button where it was rather than lying about
+     * it. A stale session surfaces as the message the site gave.
+     */
+    fun toggleFavorite() {
+        if (favoriting) return
+        val requested = topicId
+        if (requested <= 0) return
+        favoriting = true
+        viewModelScope.launch {
+            try {
+                val mark = Api.toggleFavorite(requested)
+                if (requested != topicId) return@launch
+                if (mark == null) {
+                    notice = "站点没有返回收藏状态，可能需要重新登录"
+                } else {
+                    favorite = mark
+                    notice = if (mark.on) "已加入收藏" else "已取消收藏"
+                }
+            } catch (e: Api.NeedsBrowser) {
+                if (requested == topicId) notice = e.message.orEmpty()
+            } catch (e: Throwable) {
+                if (requested == topicId) notice = e.message ?: "收藏失败"
+            } finally {
+                if (requested == topicId) favoriting = false
+            }
+        }
+    }
+
     fun clearNotice() { notice = "" }
 
     /** For failures the screen sees before the ViewModel is involved. */
@@ -421,8 +468,6 @@ fun TopicScreen(
     topicId: Int,
     vm: TopicViewModel,
     signedIn: Boolean,
-    bookmarked: Boolean,
-    onToggleBookmark: () -> Unit,
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onForum: (Int) -> Unit,
@@ -473,8 +518,11 @@ fun TopicScreen(
             onBack = onBack,
             action = if (vm.refreshing) "更新中" else "刷新",
             onAction = vm::refresh,
-            secondAction = if (bookmarked) "已收藏" else "收藏",
-            onSecondAction = onToggleBookmark
+            // 收藏 is the site's, so the action only exists when the page
+            // rendered the form - a guest gets 返回 / 板块名 / 刷新 and nothing
+            // that would fail if pressed. The label is the site's own wording.
+            secondAction = vm.favorite?.let { if (vm.favoriting) "处理中" else it.label }.orEmpty(),
+            onSecondAction = vm::toggleFavorite
         )
 
         when (val s = vm.state) {

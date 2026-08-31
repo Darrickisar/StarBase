@@ -12,6 +12,7 @@ import org.jsoup.Jsoup
 import StarBase.Android.Forum.data.AccountSettings
 import StarBase.Android.Forum.data.Board
 import StarBase.Android.Forum.data.Conversation
+import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.GachaAction
 import StarBase.Android.Forum.data.GachaPage
@@ -126,6 +127,36 @@ object Api {
 
     suspend fun topic(id: Int, page: Int = 1): TopicDetail = io {
         Parse.topic(id, page, Net.getText(Site.topic(id, page)))
+    }
+
+    /**
+     * Flips 收藏 on a topic and reports the state the site came back with.
+     *
+     * There is no local bookmark list behind this - 收藏 is the site's own, and
+     * this posts the form the topic page renders. That form declares
+     * `data-no-ajax="1"`, so the answer is a rendered page rather than JSON:
+     * the new state is read out of the page the site returns, and only if that
+     * page carries no 收藏 form at all is the topic re-read to find it.
+     *
+     * Returns null when the page has no such form - a guest, or a topic the site
+     * does not offer it on.
+     */
+    suspend fun toggleFavorite(topicId: Int): FavoriteMark? = io {
+        val page = Net.getText(Site.topic(topicId))
+        val form = Parse.favoriteForm(Jsoup.parse(page, Site.BASE)) ?: return@io null
+
+        if (form.turnstile) {
+            throw NeedsBrowser(Site.topic(topicId), "这个操作需要人机验证，用网页方式收藏")
+        }
+
+        val answer = post(form, emptyMap(), ajax = false)
+        Parse.refusal(answer)?.let { throw it }
+        if (Parse.isLoginPage(answer)) {
+            throw SiteException("登录状态已失效，请重新登录", SiteException.Kind.AUTH)
+        }
+
+        Parse.favoriteMark(Jsoup.parse(answer, Site.BASE))
+            ?: Parse.favoriteMark(Jsoup.parse(Net.getText(Site.topic(topicId)), Site.BASE))
     }
 
     /**

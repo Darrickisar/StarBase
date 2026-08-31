@@ -11,6 +11,7 @@ import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.ForumPage
 import StarBase.Android.Forum.data.ForumRef
+import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.GachaAction
 import StarBase.Android.Forum.data.GachaPage
 import StarBase.Android.Forum.data.GachaRarity
@@ -508,6 +509,51 @@ object Parse {
      * (see the site's index.js), which makes it the one selector guaranteed to
      * identify the form that actually accepts a reply.
      */
+    /** Class tokens the site could mark an already-favourited button with. */
+    private val ACTIVE_FAV_CLASSES = setOf(
+        "active", "is-active", "faved", "is-faved",
+        "favorited", "is-favorited", "favourited", "is-favourited", "on", "is-on"
+    )
+
+    /**
+     * The 收藏 form on a topic page.
+     *
+     * The site renders it only for a signed-in reader, and it is a plain POST -
+     * it carries `data-no-ajax="1"`, so the answer is a page, not JSON.
+     */
+    fun favoriteForm(doc: Document): SiteForm? =
+        formOf(doc, "form.topic-favorites-action")
+            ?: formOf(doc, "form[action*=topic_favorite]")
+
+    /**
+     * The 收藏 button as the page drew it: its own label, and whether it reads as
+     * already favourited.
+     *
+     * The label is taken verbatim rather than written here, because the site
+     * words both states itself. [FavoriteMark.on] is read off the same markup -
+     * the class the site puts on an active button, its `aria-pressed`, or the
+     * label saying 取消 / 已 - so the app never has to remember a state that
+     * belongs to the server.
+     */
+    fun favoriteMark(doc: Document): FavoriteMark? {
+        val form = doc.selectFirst("form.topic-favorites-action")
+            ?: doc.selectFirst("form[action*=topic_favorite]")
+            ?: return null
+        val button = form.selectFirst("button") ?: return null
+        val label = button.selectFirst("span")?.text()?.trim()
+            ?.ifBlank { null }
+            ?: button.text().trim().ifBlank { button.attr("title").trim() }
+        // Whole class tokens, not a substring search: "fav-btn" contains "fav"
+        // and would otherwise read as already-favourited on every topic.
+        val tokens = button.className().lowercase()
+            .split(' ', '\t', '\n')
+            .map { it.trim() }
+        val on = button.attr("aria-pressed").equals("true", ignoreCase = true) ||
+            tokens.any { it in ACTIVE_FAV_CLASSES } ||
+            label.contains("取消") || label.startsWith("已")
+        return FavoriteMark(label = label.ifBlank { "收藏" }, on = on)
+    }
+
     fun replyForm(doc: Document): SiteForm? =
         formOf(doc, "form.ajax-reply-form")
             ?: formOf(doc, ".reply-panel form:has(textarea)")
@@ -1072,6 +1118,7 @@ object Parse {
             commentsNeedLogin = loginGate != null,
             csrf = csrf,
             canReply = canReply,
+            favorite = favoriteMark(doc),
             related = emptyList()
         )
     }

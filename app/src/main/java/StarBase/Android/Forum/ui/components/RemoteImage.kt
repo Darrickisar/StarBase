@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import StarBase.Android.Forum.net.Net
 import StarBase.Android.Forum.net.Site
@@ -27,12 +28,19 @@ import StarBase.Android.Forum.net.Site
  * Images are fetched from linux.sb only - never a third party - and every
  * request carries the same UA and cookie jar as the rest of the client so it
  * looks like the one browser session it is.
+ *
+ * Nothing is written to disk: [CachePolicy.DISABLED] on the disk cache keeps a
+ * closed app from holding pictures of what was read in it, which is the same
+ * rule the rest of the client follows. The in-memory cache stays on, because
+ * that is what stops one avatar being fetched again on every scroll - it dies
+ * with the process.
  */
 private fun request(context: android.content.Context, url: String): ImageRequest =
     ImageRequest.Builder(context)
         .data(Site.absolute(url))
         .addHeader("User-Agent", Net.userAgent())
         .addHeader("Referer", "${Site.BASE}/")
+        .diskCachePolicy(CachePolicy.DISABLED)
         .crossfade(true)
         .build()
 

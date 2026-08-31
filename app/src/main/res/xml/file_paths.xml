@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The only thing this app shares out is a downloaded build, from its own cache.
+  Nothing else is exposed.
+-->
+<paths>
+    <cache-path name="apk" path="apk/" />
+</paths>

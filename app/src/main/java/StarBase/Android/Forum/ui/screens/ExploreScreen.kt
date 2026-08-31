@@ -396,7 +396,17 @@ class RankViewModel : ViewModel() {
         private set
 
     private val fresh = Freshness()
-    private val cache = mutableMapOf<String, Board>()
+
+    /**
+     * The tab strip only, keyed by tab - not the rows.
+     *
+     * Every board page lists all five tabs, so keeping the strip lets a tab
+     * switch draw its own header immediately. The rankings themselves are never
+     * kept: switching back to a tab re-reads it, because a leaderboard that
+     * moved while you were on another tab would otherwise show yesterday's
+     * order as though it were current.
+     */
+    private val tabStrip = mutableMapOf<String, List<BoardTab>>()
 
     /** Guarded per tab: switching away must not have its request eaten. */
     private var inFlight: String? = null
@@ -406,7 +416,7 @@ class RankViewModel : ViewModel() {
     /** The tab strip, from the board in hand - every board lists all five. */
     val tabs: List<BoardTab>
         get() = (state as? Load.Ready)?.value?.tabs
-            ?: cache.values.firstOrNull()?.tabs
+            ?: tabStrip.values.firstOrNull()
             ?: emptyList()
 
     fun load(force: Boolean = false) = fetch(tab, force)
@@ -414,23 +424,20 @@ class RankViewModel : ViewModel() {
     fun pick(key: String) {
         if (key == tab && state is Load.Ready) return
         tab = key
-        // Show the copy we have at once; it is a ranking, not a live figure.
-        cache[key]?.let { state = Load.Ready(it) }
-        fetch(key, force = cache[key] == null)
+        // No copy to show: the tab is fetched, and until it answers this is a
+        // load rather than a stale ranking with a spinner over it.
+        state = Load.Loading
+        fetch(key, force = true)
     }
 
     private fun fetch(key: String, force: Boolean) {
-        if (!force && cache[key] != null) {
-            state = Load.Ready(cache.getValue(key))
-            return
-        }
         if (inFlight == key) return
         inFlight = key
         viewModelScope.launch {
             if (state !is Load.Ready) state = Load.Loading else refreshing = true
             try {
                 val board = Api.board(key)
-                cache[board.key.ifBlank { key }] = board
+                tabStrip[board.key.ifBlank { key }] = board.tabs
                 // A late response for a tab the user already left must not be
                 // written to the screen.
                 if (inFlight == key) {

@@ -58,7 +58,6 @@ import StarBase.Android.Forum.ui.glass.liquidGlass
 import StarBase.Android.Forum.ui.glass.pageBackdrop
 import StarBase.Android.Forum.ui.glass.pressFeedback
 import StarBase.Android.Forum.ui.screens.AuthScreen
-import StarBase.Android.Forum.ui.screens.BookmarksScreen
 import StarBase.Android.Forum.data.ProfileTab
 import StarBase.Android.Forum.ui.screens.DiscoverEntry
 import StarBase.Android.Forum.ui.screens.ExploreScreen
@@ -88,6 +87,9 @@ import StarBase.Android.Forum.ui.screens.RankScreen
 import StarBase.Android.Forum.ui.screens.RankViewModel
 import StarBase.Android.Forum.ui.screens.SettingsScreen
 import StarBase.Android.Forum.ui.screens.SettingsViewModel
+import StarBase.Android.Forum.ui.screens.UpdateViewModel
+import StarBase.Android.Forum.ui.screens.AppSettingsScreen
+import StarBase.Android.Forum.ui.screens.hasNewerRelease
 import StarBase.Android.Forum.ui.screens.TopicScreen
 import StarBase.Android.Forum.ui.screens.TopicViewModel
 import StarBase.Android.Forum.ui.theme.LocalTokens
@@ -123,8 +125,9 @@ sealed interface Route {
     data class Thread(val partnerId: Int) : Route
     /** 发新帖. [forumId] preselects a board when it comes from that board's page. */
     data class NewTopic(val forumId: Int = 0) : Route
-    data object Bookmarks : Route
     data object Settings : Route
+    /** 应用设置. App-local, so it opens signed out too. */
+    data object AppSettings : Route
     data class Login(val register: Boolean = false) : Route
     /**
      * A site page in a WebView. [offSite] is for the one errand that has to
@@ -155,8 +158,8 @@ private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     Route.Messages -> "messages"
     is Route.Thread -> "thread:${route.partnerId}"
     is Route.NewTopic -> "new-topic"
-    Route.Bookmarks -> "bookmarks"
     Route.Settings -> "settings"
+    Route.AppSettings -> "app-settings"
 }
 
 @Composable
@@ -176,6 +179,9 @@ fun Shell(store: UserStore) {
     val profile: ProfileViewModel = viewModel()
     val gacha: GachaViewModel = viewModel()
     val settings: SettingsViewModel = viewModel()
+    // Lives as long as the app: the scheduled check runs once here, and 应用设置
+    // shows what it found instead of asking again.
+    val update: UpdateViewModel = viewModel()
 
     var tab by remember { mutableStateOf(Tab.HOME) }
     val stack = remember { mutableStateListOf<Route>() }
@@ -191,6 +197,10 @@ fun Shell(store: UserStore) {
     // hook runs once when the shell first resumes, so there is no separate
     // launch call that would ask the site the same thing twice.
     OnReturnToForeground { session.refreshIfStale() }
+
+    // 检查更新 on the schedule the user picked. Once per process and only if it
+    // is owed, so 只手动检查 really means silent - see UpdateCheck.due.
+    LaunchedEffect(Unit) { update.autoCheck(store) }
 
     fun push(route: Route) { stack.add(route) }
 
@@ -210,7 +220,6 @@ fun Shell(store: UserStore) {
 
     fun openTopic(id: Int) {
         if (id <= 0) return
-        store.recordVisit(id)
         push(Route.Topic(id))
     }
 
@@ -340,6 +349,9 @@ fun Shell(store: UserStore) {
                                         else -> requireSignIn { push(Route.Gacha) }
                                     }
                                 },
+                                // 应用设置 is app-local: it works signed out, so it
+                                // does not go through the guest redirect below.
+                                onAppSettings = { push(Route.AppSettings) },
                                 onMineEntry = { entry ->
                                     val me = session.me
                                     // §4.2: while signed out, tapping any of the eight
@@ -358,7 +370,12 @@ fun Shell(store: UserStore) {
                                         MineEntry.POINTS -> push(Route.User(me.id, "我的积分"))
                                         MineEntry.TITLES -> push(Route.Gacha)
                                         MineEntry.MESSAGES -> push(Route.Messages)
-                                        MineEntry.BOOKMARKS -> push(Route.Bookmarks)
+                                        // 收藏 is the site's own list, the one
+                                        // /user/{id}?tab=favorites renders. There is
+                                        // no local copy to show instead.
+                                        MineEntry.BOOKMARKS -> push(
+                                            Route.User(me.id, "我的收藏", ProfileTab.FAVORITES)
+                                        )
                                         MineEntry.NOTIFICATIONS -> push(Route.Notifications)
                                         MineEntry.SETTINGS -> push(Route.Settings)
                                     }
@@ -369,23 +386,10 @@ fun Shell(store: UserStore) {
                             )
 
                             is Route.Topic -> {
-                                // The title only exists once the page has loaded, so the
-                                // history entry is completed here rather than on tap -
-                                // otherwise 收藏 and 历史 would list bare ids.
-                                val loaded = (topic.state as? Load.Ready)?.value
-                                    ?.takeIf { it.id == route.id }
-                                LaunchedEffect(loaded?.id, loaded?.title) {
-                                    val title = loaded?.title.orEmpty()
-                                    if (title.isNotBlank()) store.recordVisit(route.id, title)
-                                }
                                 TopicScreen(
                                     topicId = route.id,
                                     vm = topic,
                                     signedIn = session.signedIn,
-                                    bookmarked = store.isBookmarked(route.id),
-                                    onToggleBookmark = {
-                                        store.toggleBookmark(route.id, loaded?.title.orEmpty())
-                                    },
                                     onTopic = ::openTopic,
                                     onUser = ::openUser,
                                     onForum = { push(Route.Forum(it)) },
@@ -479,14 +483,7 @@ fun Shell(store: UserStore) {
                                 onOpenSite = { openSitePage("发新帖", it) }
                             )
 
-                            Route.Bookmarks -> BookmarksScreen(
-                                store = store,
-                                onBack = ::pop,
-                                onTopic = ::openTopic
-                            )
-
                             Route.Settings -> SettingsScreen(
-                                store = store,
                                 vm = settings,
                                 signedIn = session.signedIn,
                                 onBack = ::pop,
@@ -499,6 +496,12 @@ fun Shell(store: UserStore) {
                                 onBindOAuth = { url ->
                                     push(Route.SitePage("第三方登录", url, offSite = true))
                                 }
+                            )
+
+                            Route.AppSettings -> AppSettingsScreen(
+                                store = store,
+                                vm = update,
+                                onBack = ::pop
                             )
 
                             is Route.Login -> AuthScreen(
@@ -541,6 +544,7 @@ private fun TabContent(
     onAllForums: () -> Unit,
     onDiscoverEntry: (DiscoverEntry) -> Unit,
     onMineEntry: (MineEntry) -> Unit,
+    onAppSettings: () -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
     onNewTopic: () -> Unit
@@ -574,12 +578,13 @@ private fun TabContent(
             Tab.MINE -> MineScreen(
                 me = session.me,
                 checking = session.checking,
-                store = store,
                 onEntry = onMineEntry,
+                onAppSettings = onAppSettings,
                 onLogin = onLogin,
                 onRegister = onRegister,
                 onProfile = onUser,
-                onRefresh = session::refresh
+                onRefresh = session::refresh,
+                updateReady = hasNewerRelease(store)
             )
         }
     }

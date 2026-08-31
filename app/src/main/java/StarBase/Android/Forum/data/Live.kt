@@ -121,6 +121,19 @@ data class LiveBlock(
     data class Link(val start: Int, val end: Int, val href: String)
 }
 
+/**
+ * The site's 收藏 control on a topic page, as the page rendered it.
+ *
+ * There is no local bookmark list: 收藏 is the site's own, the same one
+ * `/user/{id}?tab=favorites` lists. [label] is the button's own text, so the
+ * screen shows whatever the site says rather than a guess - and [on] is read
+ * from that same markup instead of from a state the app keeps.
+ */
+data class FavoriteMark(
+    val label: String,
+    val on: Boolean
+)
+
 /** A loaded topic page. */
 data class TopicDetail(
     val id: Int,
@@ -137,6 +150,8 @@ data class TopicDetail(
     /** Token required to POST a reply; blank when not logged in. */
     val csrf: String = "",
     val canReply: Boolean = false,
+    /** The site's 收藏 button, or null when the page did not render one. */
+    val favorite: FavoriteMark? = null,
     val related: List<TopicCard> = emptyList()
 )
 

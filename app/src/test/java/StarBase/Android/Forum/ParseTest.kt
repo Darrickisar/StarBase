@@ -1,5 +1,6 @@
 package StarBase.Android.Forum
 
+import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -1353,5 +1354,73 @@ class ParseTest {
     @Test
     fun guestSidebarIsNotAnIdentity() {
         assertNull(Parse.home(fixture("home.html")).me)
+    }
+
+    // ---- 收藏 ----------------------------------------------------------------
+
+    /**
+     * 收藏 posts to the site, so the endpoint and the fields are what matter.
+     * The app used to keep a local list instead, which could disagree with the
+     * website; this asserts it is reading the site's own form.
+     */
+    @Test
+    fun favoriteFormPostsToTopicFavorite() {
+        val form = Parse.favoriteForm(Jsoup.parse(fixture("topic-signed.html")))
+        assertNotNull("signed-in topic page must carry the 收藏 form", form)
+        assertTrue("must post", form!!.post)
+        assertTrue("action is /topic_favorite, got ${form.action}",
+            form.action.endsWith("/topic_favorite"))
+        assertEquals(setOf("_csrf", "topic_id"), form.fields.keys)
+        assertEquals("17536", form.fields["topic_id"])
+    }
+
+    /** The button's own words, and its state read from the same markup. */
+    @Test
+    fun favoriteMarkReadsTheSiteLabel() {
+        val mark = Parse.favoriteMark(Jsoup.parse(fixture("topic-signed.html")))
+        assertNotNull(mark)
+        assertEquals("收藏", mark!!.label)
+        // This capture's account had not favourited the topic. "fav-btn"
+        // contains "fav", so a substring test would have read it as on.
+        assertFalse(mark.on)
+    }
+
+    /** A guest page renders no such form, and the screen must show no action. */
+    @Test
+    fun guestTopicHasNoFavoriteControl() {
+        assertNull(Parse.favoriteForm(Jsoup.parse(fixture("topic1.html"))))
+        assertNull(Parse.favoriteMark(Jsoup.parse(fixture("topic1.html"))))
+        assertNull(Parse.topic(1, 1, fixture("topic1.html")).favorite)
+    }
+
+    /** The parsed topic carries the mark, so the bar draws the site's state. */
+    @Test
+    fun topicCarriesTheFavoriteMark() {
+        val mark = Parse.topic(17536, 1, fixture("topic-signed.html")).favorite
+        assertNotNull(mark)
+        assertEquals("收藏", mark!!.label)
+    }
+
+    /**
+     * The already-favourited state has to be read, not remembered. The site's
+     * own wording for it is not in any capture we hold, so every signal the app
+     * accepts is pinned here: the class, aria-pressed, and a 取消/已 label.
+     */
+    @Test
+    fun favoriteMarkDetectsTheOnState() {
+        fun mark(button: String) = Parse.favoriteMark(
+            Jsoup.parse(
+                """<form class="topic-favorites-action" method="post" action="/topic_favorite">
+                   <input type="hidden" name="topic_id" value="7">$button</form>"""
+            )
+        )
+        assertTrue(mark("""<button class="fav-btn is-active"><span>收藏</span></button>""")!!.on)
+        assertTrue(mark("""<button class="fav-btn favorited"><span>收藏</span></button>""")!!.on)
+        assertTrue(mark("""<button class="fav-btn" aria-pressed="true"><span>收藏</span></button>""")!!.on)
+        assertTrue(mark("""<button class="fav-btn"><span>取消收藏</span></button>""")!!.on)
+        assertTrue(mark("""<button class="fav-btn"><span>已收藏</span></button>""")!!.on)
+        assertFalse(mark("""<button class="fav-btn"><span>收藏</span></button>""")!!.on)
+        // The label is the site's, whatever it says.
+        assertEquals("取消收藏", mark("""<button class="fav-btn"><span>取消收藏</span></button>""")!!.label)
     }
 }

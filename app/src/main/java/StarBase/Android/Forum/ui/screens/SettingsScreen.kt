@@ -49,8 +49,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import StarBase.Android.Forum.data.AccountSettings
 import StarBase.Android.Forum.data.OAuthBinding
-import StarBase.Android.Forum.data.ThemeMode
-import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Site
 import StarBase.Android.Forum.net.SiteException
@@ -231,7 +229,9 @@ private fun reasonOf(e: Throwable): String = when (e) {
 }
 
 /**
- * 个人设置.
+ * 个人设置 - the linux.sb account only. 外观 and 本机数据 used to sit at the
+ * bottom of this page; they moved to 应用设置, which is where everything that
+ * belongs to the app rather than to the account now lives.
  *
  * [onBindOAuth] is separate from [onOpenSite] because a binding hop leaves
  * linux.sb for GitHub or Google and has to be allowed to: the ordinary site
@@ -240,7 +240,6 @@ private fun reasonOf(e: Throwable): String = when (e) {
  */
 @Composable
 fun SettingsScreen(
-    store: UserStore,
     vm: SettingsViewModel,
     signedIn: Boolean,
     onBack: () -> Unit,
@@ -341,50 +340,6 @@ fun SettingsScreen(
                                 onBindOAuth(binding.href)
                             }
                         }
-                    }
-                }
-            }
-
-            item("theme") {
-                Gap(12)
-                SbCard(modifier = cardModifier(), padding = 14.dp) {
-                    Text(
-                        text = "主题外观",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = LocalTokens.current.textPrimary
-                    )
-                    Gap(10)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ThemeMode.entries.forEach { mode ->
-                            SegmentPill(
-                                label = mode.label,
-                                selected = store.themeMode == mode,
-                                onClick = { store.updateTheme(mode) }
-                            )
-                        }
-                    }
-                }
-            }
-
-            item("local") {
-                Gap(12)
-                SbCard(modifier = cardModifier(), padding = 14.dp) {
-                    Text(
-                        text = "本机数据",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = LocalTokens.current.textPrimary
-                    )
-                    Gap(5)
-                    Text(
-                        text = "收藏 ${store.bookmarks.size} 条 · 浏览历史 ${store.history.size} 条，" +
-                            "只存在这台手机上。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = LocalTokens.current.textSecondary
-                    )
-                    Gap(12)
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        SmallAction("清空收藏", primary = false, onClick = store::clearBookmarks)
-                        SmallAction("清空历史", primary = false, onClick = store::clearHistory)
                     }
                 }
             }

@@ -44,7 +44,6 @@ import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
-import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
@@ -65,7 +64,6 @@ import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.SbCard
 import StarBase.Android.Forum.ui.components.SectionHeader
 import StarBase.Android.Forum.ui.components.SegmentPill
-import StarBase.Android.Forum.ui.components.SimpleTopicRow
 import StarBase.Android.Forum.ui.components.TopicRow
 import StarBase.Android.Forum.ui.components.UserAvatar
 import StarBase.Android.Forum.ui.components.tierColor
@@ -795,54 +793,6 @@ private fun ConversationRow(item: Conversation, onClick: () -> Unit) {
                     .background(tokens.hotTint)
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             )
-        }
-    }
-}
-
-// ---- 收藏 / 浏览历史 ---------------------------------------------------------
-
-@Composable
-fun BookmarksScreen(
-    store: UserStore,
-    onBack: () -> Unit,
-    onTopic: (Int) -> Unit
-) {
-    var tab by remember { mutableStateOf(0) }
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        DetailBar(
-            title = if (tab == 0) "收藏" else "浏览历史",
-            subtitle = "保存在本机，不会上传",
-            onBack = onBack,
-            action = if (tab == 0) "清空收藏" else "清空历史",
-            onAction = { if (tab == 0) store.clearBookmarks() else store.clearHistory() }
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding, vertical = 11.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            SegmentPill("收藏 ${store.bookmarks.size}", tab == 0) { tab = 0 }
-            SegmentPill("历史 ${store.history.size}", tab == 1) { tab = 1 }
-        }
-
-        val ids = if (tab == 0) store.bookmarks else store.history
-        if (ids.isEmpty()) {
-            EmptyPanel(
-                if (tab == 0) "还没有收藏" else "还没有浏览记录",
-                if (tab == 0) "在帖子页点右上角的收藏" else "看过的帖子会出现在这里"
-            )
-        } else {
-            LazyColumn {
-                itemsIndexed(ids.toList(), key = { i, id -> "$id-$i" }) { index, id ->
-                    if (index > 0) Hairline(startInset = 16)
-                    SimpleTopicRow(
-                        title = store.titleOf(id).ifBlank { "帖子 #$id" },
-                        subtitle = "#$id",
-                        onClick = { onTopic(id) }
-                    )
-                }
-                item("tail") { Gap(24) }
-            }
         }
     }
 }
