@@ -40,6 +40,10 @@ App 内的登录页，不再把人踢回网页。
 | 主楼打赏 | `/donate`，要先 XHR 取 `/donate?topic_id=` 拿一次性 `request_key` | 无，用 `amount` |
 | 私信 | `/direct_messages/{对方uid}` | `content` |
 | 附件 | `/attachment_upload`，独立端点 | 无，`attachment` 是文件部分 |
+| 改资料 / 简介 / 密码 / dicebear 头像 | `/profile`（表单无 action，发回自己） | `bio` |
+| 改用户名 | `/username_change` | 无，用 `new_username` + `current_password` |
+| 改邮箱 | `/user_review_email_change`，先 XHR 取 `/user_review_email_code` 发码 | 无，用 `email` + `email_code` |
+| 头像上传 / 选预设 | `/avatar_upload`，独立端点 | 无，判别字段 `avatar_upload_action` |
 
 主楼和评论的点赞是**两套无关的机制**：评论的表单就在页面上，主楼页面上只有一个链接，真表单在
 `/donate?topic_id=` 的 JSON 里，且 `request_key` 一次性，不能缓存。
@@ -48,6 +52,11 @@ App 内的登录页，不再把人踢回网页。
 
 开新会话不需要额外接口——用户搜索的每条结果都直接指向 `/direct_messages/{uid}`，那个页面对从没
 聊过的人一样渲染发送框，空会话就是新会话。
+
+`/profile` 那一张表单同时管着头像风格、简介和密码三件事，所以改任何一项都是整份读回、只覆盖
+那一项再提交。改用户名的两个输入框用 HTML5 的 `form=` 属性从表单**外面**关联进去，同时又正好
+坐在 `/profile` 表单里——两个方向都要算，否则改名提交出去只有一个 token，或者保存资料时顺手
+提交一次改名。
 
 引用楼层不是表单字段：站点的回帖处理器从正文文本里认 `@某人 #12`，所以 `Parse.quotePrefix`
 负责写、解析层负责读，两个方向有往返测试互锁。
@@ -193,6 +202,10 @@ App 界面内的品牌位不用位图，`ui/components/StarMark.kt` 用 Canvas �
   没做进去。
 - 附件一次传一个。站点网页版能多选排队上传，App 没做队列。
 - 搜索必须登录，这是站点的限制。
+- 头像上传没有裁剪界面。站点是拖拽缩放的裁剪面板，App 按 EXIF 转正后居中裁最大正方形、缩到
+  200×200 存 JPEG。
+- 个人设置里的「首页无限滚动」（网页端偏好）和「注销账号」（不可逆）没做进来，走「网页版设置」。
+- 第三方登录绑定这一跳走 App 内的 WebView，不是原生请求：它要离开站点去 GitHub 或 Google 再回来。
 - 没有 Gradle wrapper（见上）。
 
 ## 声明
