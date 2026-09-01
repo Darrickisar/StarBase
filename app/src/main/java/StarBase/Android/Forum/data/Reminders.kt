@@ -127,6 +127,23 @@ object Reminders {
         return next.timeInMillis
     }
 
+    /**
+     * Epoch millis for a wall-clock date and time, or 0 when the parts are not a
+     * real moment.
+     *
+     * Shared by the two places a draw time comes from - the site's own 抽奖卡 and
+     * the prose fallback - so 13 月 and 25 点 are rejected once rather than twice.
+     * Rejecting is the point: a reminder at the wrong hour is worse than none.
+     */
+    fun epochAt(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long {
+        if (year < 2000 || month !in 1..12 || day !in 1..31) return 0L
+        if (hour !in 0..23 || minute !in 0..59) return 0L
+        return Calendar.getInstance().apply {
+            clear()
+            set(year, month - 1, day, hour, minute)
+        }.timeInMillis
+    }
+
     /** Epoch millis for a time of day today, used when 签到 is first turned on. */
     fun todayAt(hour: Int, minute: Int, now: Long): Long = Calendar.getInstance().apply {
         timeInMillis = now

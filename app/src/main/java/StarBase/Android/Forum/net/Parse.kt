@@ -20,6 +20,7 @@ import StarBase.Android.Forum.data.GachaResult
 import StarBase.Android.Forum.data.GachaTitle
 import StarBase.Android.Forum.data.HomePage
 import StarBase.Android.Forum.data.LiveBlock
+import StarBase.Android.Forum.data.Lottery
 import StarBase.Android.Forum.data.Me
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.OAuthBinding
@@ -29,6 +30,7 @@ import StarBase.Android.Forum.data.PointsRule
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.RankRowData
+import StarBase.Android.Forum.data.Reminders
 import StarBase.Android.Forum.data.SiteStats
 import StarBase.Android.Forum.data.Title
 import StarBase.Android.Forum.data.TopicCard
@@ -858,6 +860,16 @@ object Parse {
         "code", "sub", "sup", "mark", "br", "font", "abbr", "kbd"
     )
 
+    /**
+     * Sections the site prints inside `.post-content` that are not the post.
+     *
+     * The 抽奖卡 is a rendered field, read by [lotteryOf] and drawn as a panel of
+     * its own; walked as body it becomes a run of stray paragraphs - 抽奖帖,
+     * 抽奖中, 410 人参与, 中奖名单 - which is what a short lottery post used to show,
+     * because only a *long* post has the fold wrapper that happened to hide it.
+     */
+    private const val PANEL_SECTIONS = ".community-lottery-card"
+
     private fun blocksOf(content: Element): List<LiveBlock> {
         // Long posts are wrapped in a fold container; the real body is inside.
         val root = content.selectFirst("[data-long-content-fold]") ?: content
@@ -936,6 +948,7 @@ object Parse {
         }
 
         fun walk(el: Element) {
+            if (el.`is`(PANEL_SECTIONS)) return
             when (el.tagName().lowercase()) {
                 "p", "div" -> {
                     // A paragraph that only wraps an image should become an image.
@@ -1002,9 +1015,12 @@ object Parse {
 
         root.children().forEach { walk(it) }
 
-        // A body with no element children at all (bare text node) still has text.
+        // A body with no element children at all (bare text node) still has text -
+        // but a post whose only child is the 抽奖卡 is empty, not a wall of panel
+        // text, so the panel comes out of the clone this reads from.
         if (out.isEmpty()) {
-            root.text().trim().takeIf { it.isNotBlank() }?.let {
+            val bare = root.clone().apply { select(PANEL_SECTIONS).remove() }
+            bare.text().trim().takeIf { it.isNotBlank() }?.let {
                 out += LiveBlock(LiveBlock.Type.PARA, it)
             }
         }
@@ -1073,6 +1089,69 @@ object Parse {
                 .split(',').mapNotNull { it.trim().toIntOrNull() }.filter { it > 0 },
             parentFloor = parentFloor,
             replyCount = replyCount
+        )
+    }
+
+    /**
+     * `到 2026-09-04 09:12自动开奖` - the site's own condition line.
+     *
+     * `datetime-local` is what the publish form posts, so the printed form is
+     * always ISO-ish; no other shape is accepted, because a draw time guessed
+     * wrong is an alarm at the wrong hour.
+     */
+    private val lotteryClock =
+        Regex("""(\d{4})-(\d{1,2})-(\d{1,2})[\sT]+(\d{1,2})[:：](\d{2})""")
+
+    /**
+     * 抽奖卡, off `.community-lottery-card` at the end of 主楼.
+     *
+     * Read as a field rather than out of the prose: a site-made lottery prints its
+     * deadline here and nowhere else, which is why 开奖时间 was invisible in the app
+     * and 开奖提醒 could never be triggered. Text is kept as the site wrote it -
+     * the wallet unit, the 份数 and the 「满 N 人自动开奖」 wording are all the site's,
+     * and re-phrasing any of them would be the app inventing terms of a draw.
+     */
+    internal fun lotteryOf(doc: Element): Lottery? {
+        val card = doc.selectFirst(".community-lottery-card") ?: return null
+        val pill = card.textOf(".community-lottery-status-pill")
+        val condition = card.textOf(".community-lottery-condition")
+        val drawAt = lotteryClock.find(condition)?.let { m ->
+            val (y, mo, d, h, min) = m.destructured
+            Reminders.epochAt(
+                year = y.toIntOrNull() ?: 0,
+                month = mo.toIntOrNull() ?: 0,
+                day = d.toIntOrNull() ?: 0,
+                hour = h.toIntOrNull() ?: 0,
+                minute = min.toIntOrNull() ?: 0
+            )
+        } ?: 0L
+
+        return Lottery(
+            status = pill,
+            // `is-open` is the site's own state; the pill is the fallback, so a
+            // renamed class does not turn a live draw into a finished one.
+            open = card.hasClass("is-open") || (pill.isNotBlank() && !pill.contains("已")),
+            // The header's own sentence. The side block holds a strong and an em,
+            // so the only span in there is this one.
+            note = card.selectFirst("header span")?.text()?.trim().orEmpty(),
+            participants = card.textOf(".community-lottery-card-side em"),
+            prizes = card.select(".community-lottery-prizes > li").mapNotNull { li ->
+                val name = li.selectFirst("strong")?.text()?.trim().orEmpty()
+                val detail = li.selectFirst("span")?.text()?.trim().orEmpty()
+                if (name.isBlank() && detail.isBlank()) null else Lottery.Prize(name, detail)
+            },
+            condition = condition,
+            drawAt = drawAt,
+            result = card.textOf(".community-lottery-result"),
+            winners = card.select(".community-lottery-winners li").mapNotNull { li ->
+                val link = li.selectFirst("a[href]") ?: return@mapNotNull null
+                val name = link.text().trim()
+                if (name.isBlank()) null else Lottery.Winner(
+                    userId = idFrom(link.attr("href"), "user"),
+                    name = name,
+                    prize = li.selectFirst("span")?.text()?.trim().orEmpty()
+                )
+            }
         )
     }
 
@@ -1149,6 +1228,9 @@ object Parse {
             csrf = csrf,
             canReply = canReply,
             favorite = favoriteMark(doc),
+            // The card renders with 主楼, so it is only on page 1 - which is also
+            // where a `null` here correctly means 「这一页没有抽奖卡」.
+            lottery = lotteryOf(doc),
             related = emptyList()
         )
     }

@@ -253,21 +253,33 @@ fun PageHead(
 fun LightAction(
     text: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * On/off state, for an action that actually has one.
+     *
+     * Off by default because the site's own actions in a bar are verbs, not
+     * switches - 刷新 and 收藏 do a thing and go back to looking the same. An
+     * action that lights up is telling you it is currently on.
+     */
+    active: Boolean = false
 ) {
     val tokens = LocalTokens.current
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = modifier
             .pressFeedback(interaction)
-            .liquidGlass(shape = RoundedCornerShape(50), level = GlassLevel.LOW, refract = false)
+            .liquidGlass(
+                shape = RoundedCornerShape(50),
+                level = if (active) GlassLevel.MEDIUM else GlassLevel.LOW,
+                refract = false
+            )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(horizontal = 13.dp, vertical = 7.dp)
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.labelMedium,
-            color = tokens.textSecondary,
+            color = if (active) tokens.accentWarm else tokens.textSecondary,
             maxLines = 1
         )
     }

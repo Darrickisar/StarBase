@@ -645,6 +645,13 @@ fun ForumScreen(
  * It is deliberately not a Material app bar: one row of light glass pills over
  * the ambient room, closed by a hairline, so a detail page opens on its own
  * content rather than on a heavy header.
+ *
+ * [localAction] is a third slot, ahead of those two, for an action that is the
+ * app's own rather than the site's - 帖子页's 追帖 is the one user of it. It is a
+ * slot of its own on purpose: the site's two keep theirs, so putting one of ours
+ * up here never costs 收藏 or 刷新 its place, and [localActive] lets it show that
+ * it is a switch. Screens that have no such action pass nothing and look exactly
+ * as they did.
  */
 @Composable
 fun DetailBar(
@@ -654,7 +661,10 @@ fun DetailBar(
     action: String = "",
     onAction: (() -> Unit)? = null,
     secondAction: String = "",
-    onSecondAction: (() -> Unit)? = null
+    onSecondAction: (() -> Unit)? = null,
+    localAction: String = "",
+    onLocalAction: (() -> Unit)? = null,
+    localActive: Boolean = false
 ) {
     val tokens = LocalTokens.current
     Column {
@@ -706,6 +716,10 @@ fun DetailBar(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+            if (localAction.isNotBlank() && onLocalAction != null) {
+                LightAction(text = localAction, onClick = onLocalAction, active = localActive)
+                Spacer(Modifier.width(6.dp))
             }
             if (secondAction.isNotBlank() && onSecondAction != null) {
                 LightAction(text = secondAction, onClick = onSecondAction)

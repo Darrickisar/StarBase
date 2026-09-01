@@ -161,6 +161,54 @@ data class FavoriteChange(
     val changed: Boolean
 )
 
+/**
+ * 抽奖帖 的抽奖卡, as the site renders it at the end of the opening post.
+ *
+ * This is a **field on the page**, not something read out of the prose. The site
+ * models a lottery properly - the publish form posts `lottery_draw_at`,
+ * `lottery_prize_name[]` and the rest - and prints the result as a
+ * `.community-lottery-card` section under the opening body. The app used to look
+ * for 「开奖时间」 in the body text instead, which is why the time never showed and
+ * 开奖提醒 never appeared: a site-made lottery writes nothing of the sort in the
+ * post, and the section itself sits outside the fold wrapper the body parser
+ * reads.
+ *
+ * Every string here is the site's own wording, kept verbatim rather than
+ * recomposed - [condition] in particular, because 「到 … 自动开奖」 and
+ * 「满 500 人自动开奖」 are two different promises and only one of them is a clock.
+ */
+data class Lottery(
+    /** 抽奖中 / 已开奖 - the site's own pill. */
+    val status: String = "",
+    /** True while it is still taking part-takers (`is-open` on the section). */
+    val open: Boolean = false,
+    /** The header sentence: 回复满 5 字即参与，需完成人机验证 / 本次抽奖已经完成. */
+    val note: String = "",
+    /** `410 人参与`, as printed. */
+    val participants: String = "",
+    val prizes: List<Prize> = emptyList(),
+    /** 到 2026-09-04 09:12自动开奖 / 满 500 人自动开奖 - whichever this draw uses. */
+    val condition: String = "",
+    /**
+     * The moment in [condition], epoch millis, or 0 when this draw has no clock.
+     *
+     * 0 is the ordinary case for a 人数-triggered draw, and it is why 开奖提醒 is
+     * absent there rather than guessing: nobody knows when the 500th reply lands.
+     */
+    val drawAt: Long = 0L,
+    /** `实际中奖 4 人`, on a drawn one. */
+    val result: String = "",
+    val winners: List<Winner> = emptyList()
+) {
+    data class Prize(
+        val name: String,
+        /** `兑换码 · 5 份 · 每份 1 个烧饼` - type, count and unit in one printed line. */
+        val detail: String
+    )
+
+    data class Winner(val userId: Int, val name: String, val prize: String)
+}
+
 /** A loaded topic page. */
 data class TopicDetail(
     val id: Int,
@@ -179,6 +227,8 @@ data class TopicDetail(
     val canReply: Boolean = false,
     /** The site's 收藏 button, or null when the page did not render one. */
     val favorite: FavoriteMark? = null,
+    /** The 抽奖卡 the site printed under 主楼, when this is an 抽奖帖. */
+    val lottery: Lottery? = null,
     val related: List<TopicCard> = emptyList()
 )
 

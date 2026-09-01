@@ -21,14 +21,14 @@ import androidx.compose.ui.unit.dp
  * 引用 and 点赞 used to be the words themselves, which made a comment's meta line
  * read as a sentence with two verbs buried in it. Drawn on the same 24-unit grid
  * as the bottom bar's [NavIcon] and stroked in the caller's tint, so the two sets
- * stay one family. material-icons is not on the classpath and three paths are
- * cheaper than adding it.
+ * stay one family. material-icons is not on the classpath and a handful of paths
+ * are cheaper than adding it.
  *
  * [ActionGlyph.HEART] fills rather than strokes once it is on, because 已赞 has to
  * be readable at 15dp where a stroke-weight change is not.
  */
 
-enum class ActionGlyph { HEART, QUOTE, COIN, CLIP }
+enum class ActionGlyph { HEART, QUOTE, COIN, CLIP, SHARE }
 
 private const val VIEW = 24f
 
@@ -48,8 +48,45 @@ fun ActionIcon(
             ActionGlyph.QUOTE -> quote(tint, u, stroke)
             ActionGlyph.COIN -> coin(tint, u, stroke, filled)
             ActionGlyph.CLIP -> clip(tint, u, stroke)
+            ActionGlyph.SHARE -> share(tint, u, stroke)
         }
     }
+}
+
+/**
+ * 分享成图: an arrow leaving an open tray.
+ *
+ * The one share shape people already read as share, which matters more here than
+ * originality - it is the only way into 分享成图, and nothing beside it says the
+ * word. Deliberately not a picture frame: what leaves is the card, and a frame
+ * would read as 「看图片」 next to a post that is already full of images.
+ */
+private fun DrawScope.share(tint: Color, u: Float, stroke: Stroke) {
+    // The tray, open at the top so the arrow reads as coming out of it.
+    drawPath(
+        Path().apply {
+            moveTo(8.4f * u, 10.6f * u)
+            lineTo(5.2f * u, 10.6f * u)
+            lineTo(5.2f * u, 19.4f * u)
+            lineTo(18.8f * u, 19.4f * u)
+            lineTo(18.8f * u, 10.6f * u)
+            lineTo(15.6f * u, 10.6f * u)
+        },
+        color = tint,
+        style = stroke
+    )
+    // Shaft and head in one path, so the tip stays a single point.
+    drawPath(
+        Path().apply {
+            moveTo(12f * u, 15.2f * u)
+            lineTo(12f * u, 4.6f * u)
+            moveTo(8.3f * u, 8.3f * u)
+            lineTo(12f * u, 4.6f * u)
+            lineTo(15.7f * u, 8.3f * u)
+        },
+        color = tint,
+        style = stroke
+    )
 }
 
 /** 附件: a paperclip - one open loop, which stays legible at 15dp. */

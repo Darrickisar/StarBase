@@ -66,11 +66,27 @@ enum class MineEntry(val label: String, val glyph: String) {
     SETTINGS("个人设置", "设")
 }
 
+/**
+ * §4.4 本机 section: the three device-local lists, each its own screen.
+ *
+ * They used to be reachable only from inside 应用设置, which is where a setting
+ * belongs but not where a list does - 追帖看板 and 提醒 are things you go and look
+ * at, not switches you set once. So they get a row of their own here, above
+ * 应用设置, and none of them needs a session: everything behind these three was
+ * written by this device.
+ */
+enum class LocalEntry(val label: String, val glyph: String, val hint: String) {
+    WATCH("追帖", "追", "有新回复"),
+    REMINDERS("提醒", "醒", "签到 · 开奖"),
+    BLOCKS("屏蔽", "屏", "关键词 · 用户")
+}
+
 @Composable
 fun MineScreen(
     me: Me?,
     checking: Boolean,
     onEntry: (MineEntry) -> Unit,
+    onLocalEntry: (LocalEntry) -> Unit,
     onAppSettings: () -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
@@ -106,6 +122,8 @@ fun MineScreen(
             Gap(18)
             SectionHeader(title = "本机", subtitle = "不需要登录")
             Gap(10)
+            LocalEntryRow(onEntry = onLocalEntry)
+            Gap(8)
             AppSettingsRow(updateReady = updateReady, onClick = onAppSettings)
             Gap(28)
         }
@@ -324,6 +342,70 @@ private fun EntryCell(
             color = tokens.textTertiary.copy(alpha = 0.5f),
             modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 7.dp)
         )
+    }
+}
+
+/**
+ * The three 本机 lists, one glass panel, three cells - the same shape as the eight
+ * above so the page still reads as one grid, with a second line of text because
+ * 「提醒」 and 「屏蔽」 on their own do not say what they hold.
+ */
+@Composable
+private fun LocalEntryRow(onEntry: (LocalEntry) -> Unit) {
+    GlassPanel(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+        level = GlassLevel.LOW,
+        padding = 8.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            LocalEntry.entries.forEach { entry ->
+                LocalCell(entry = entry, modifier = Modifier.weight(1f)) { onEntry(entry) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LocalCell(
+    entry: LocalEntry,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val tokens = LocalTokens.current
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = modifier
+            .height(88.dp)
+            .pressFeedback(interaction)
+            .clip(RoundedCornerShape(SbRadius.field))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(top = 11.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            GlyphTile(glyph = entry.glyph, size = 31.dp)
+            Gap(6)
+            Text(
+                text = entry.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.textSecondary,
+                textAlign = TextAlign.Center,
+                maxLines = 1
+            )
+            Gap(2)
+            Text(
+                text = entry.hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.textTertiary,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 

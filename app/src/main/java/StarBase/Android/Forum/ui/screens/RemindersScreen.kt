@@ -173,7 +173,7 @@ fun RemindersScreen(
                 item("draws-empty") {
                     EmptyPanel(
                         "还没有开奖提醒",
-                        "打开一个写着开奖时间的抽奖帖，右上角就能设一个"
+                        "打开一个抽奖帖，主楼正文下面那张抽奖卡上写着开奖时间，「开奖提醒」就在它旁边"
                     )
                 }
             } else {

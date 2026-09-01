@@ -40,6 +40,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import StarBase.Android.Forum.data.BlockRule
 import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.DirectMessage
@@ -944,9 +945,25 @@ fun ProfileScreen(
     OnReturnToForeground(userId) { vm.refreshIfStale() }
 
     var revealBlocked by remember(userId) { mutableStateOf(false) }
+    var notice by remember(userId) { mutableStateOf("") }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         val loaded = (vm.state as? Load.Ready)?.value
+
+        /*
+         * 屏蔽 TA.
+         *
+         * The one place in the app where a 屏蔽 rule can be made without typing a
+         * name: the page already knows whose it is, and the rule matches whole
+         * names, so a hand-typed one is the only version that can be wrong. It is
+         * an [BlockRule.Kind.AUTHOR] rule like any other - 应用设置 -> 屏蔽规则
+         * lists it, and turning it off there brings everything straight back.
+         */
+        val who = loaded?.name.orEmpty().trim()
+        fun blockedNow() = store.blockRules.any {
+            it.kind == BlockRule.Kind.AUTHOR && it.value.equals(who, ignoreCase = true)
+        }
+        val blocked = who.isNotBlank() && blockedNow()
         DetailBar(
             title = titleOverride.ifBlank { loaded?.name.orEmpty().ifBlank { "个人主页" } },
             subtitle = if (vm.refreshing) {
@@ -958,8 +975,32 @@ fun ProfileScreen(
             },
             onBack = onBack,
             action = "刷新",
-            onAction = vm::refresh
+            onAction = vm::refresh,
+            localAction = if (who.isBlank()) "" else if (blocked) "已屏蔽" else "屏蔽",
+            localActive = blocked,
+            onLocalAction = if (who.isBlank()) {
+                null
+            } else {
+                {
+                    if (blocked) {
+                        store.removeBlockRule(BlockRule(value = who, kind = BlockRule.Kind.AUTHOR))
+                        notice = "已取消屏蔽 $who"
+                    } else {
+                        store.addBlockRule(BlockRule(value = who, kind = BlockRule.Kind.AUTHOR))
+                        // add() drops the rule when the list is already full, so
+                        // the message is read back off the list rather than assumed.
+                        notice = if (blockedNow()) {
+                            "已屏蔽 $who：TA 的主题从列表里收起来，帖子里的回复折起来"
+                        } else {
+                            "屏蔽规则最多 ${Filters.CAP} 条了，先去应用设置里删几条"
+                        }
+                    }
+                }
+            }
         )
+        if (notice.isNotBlank()) {
+            NoticeBar(notice) { notice = "" }
+        }
         when (val s = vm.state) {
             is Load.Loading -> LoadingMark()
             is Load.Failed -> ErrorPanel(s.message, s.kind, vm::refresh, onLogin)

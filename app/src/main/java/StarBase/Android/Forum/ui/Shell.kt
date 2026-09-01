@@ -77,6 +77,7 @@ import StarBase.Android.Forum.ui.screens.HomeScreen
 import StarBase.Android.Forum.ui.screens.HomeViewModel
 import StarBase.Android.Forum.ui.screens.MessagesScreen
 import StarBase.Android.Forum.ui.screens.MessagesViewModel
+import StarBase.Android.Forum.ui.screens.LocalEntry
 import StarBase.Android.Forum.ui.screens.MineEntry
 import StarBase.Android.Forum.ui.screens.MineScreen
 import StarBase.Android.Forum.ui.screens.NewTopicScreen
@@ -340,6 +341,21 @@ fun Shell(
         )
     }
 
+    /**
+     * Takes a 开奖提醒 back off.
+     *
+     * The alarm is cancelled before the record goes, the mirror of setting it: the
+     * list is what the app knows about its own alarms, so it must never name one
+     * the system no longer holds - nor drop one the system still does.
+     */
+    fun cancelDrawReminder(topicId: Int) {
+        val id = Reminders.drawId(topicId)
+        if (store.reminder(id) == null) return
+        Alarms.cancel(context, id)
+        store.removeReminder(id)
+        topic.showNotice("已取消开奖提醒")
+    }
+
     BackHandler(enabled = stack.isNotEmpty()) { pop() }
 
     val rise = with(LocalDensity.current) { 5.dp.roundToPx() }
@@ -459,6 +475,16 @@ fun Shell(
                                         MineEntry.SETTINGS -> push(Route.Settings)
                                     }
                                 },
+                                // The 本机 three, unlike the eight above them, work
+                                // signed out - what is behind each one was written
+                                // by this device, so there is nothing to log in to.
+                                onLocalEntry = { entry ->
+                                    when (entry) {
+                                        LocalEntry.WATCH -> push(Route.Watch)
+                                        LocalEntry.REMINDERS -> push(Route.Reminders)
+                                        LocalEntry.BLOCKS -> push(Route.Blocks)
+                                    }
+                                },
                                 onLogin = { push(Route.Login()) },
                                 onRegister = { push(Route.Login(register = true)) },
                                 onNewTopic = { push(Route.NewTopic()) }
@@ -493,7 +519,8 @@ fun Shell(
                                     onLogin = { push(Route.Login()) },
                                     onRegister = { push(Route.Login(register = true)) },
                                     onOpenLink = ::openLink,
-                                    onSetDrawReminder = ::setDrawReminder
+                                    onSetDrawReminder = ::setDrawReminder,
+                                    onCancelDrawReminder = ::cancelDrawReminder
                                 )
                             }
 
@@ -687,6 +714,7 @@ private fun TabContent(
     onAllForums: () -> Unit,
     onDiscoverEntry: (DiscoverEntry) -> Unit,
     onMineEntry: (MineEntry) -> Unit,
+    onLocalEntry: (LocalEntry) -> Unit,
     onAppSettings: () -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
@@ -725,6 +753,7 @@ private fun TabContent(
                 me = session.me,
                 checking = session.checking,
                 onEntry = onMineEntry,
+                onLocalEntry = onLocalEntry,
                 onAppSettings = onAppSettings,
                 onLogin = onLogin,
                 onRegister = onRegister,

@@ -1,5 +1,10 @@
 package StarBase.Android.Forum.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -41,10 +46,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Reading
+import StarBase.Android.Forum.data.Reminders
 import StarBase.Android.Forum.data.TopicDetail
 import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.UserStore
@@ -65,6 +72,7 @@ import StarBase.Android.Forum.ui.components.MetaDot
 import StarBase.Android.Forum.ui.components.MetaRow
 import StarBase.Android.Forum.ui.components.ActionGlyph
 import StarBase.Android.Forum.ui.components.ActionIcon
+import StarBase.Android.Forum.ui.components.LotteryCard
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.rememberFilePicker
 import StarBase.Android.Forum.ui.components.PostBody
@@ -548,8 +556,10 @@ fun TopicScreen(
     onLogin: () -> Unit,
     onRegister: () -> Unit,
     onOpenLink: (String) -> Unit,
-    /** Offers 开奖提醒 when the opening post prints a draw time. */
-    onSetDrawReminder: (topicId: Int, title: String, drawAt: Long) -> Unit = { _, _, _ -> }
+    /** Offers 开奖提醒 for a draw whose time is known, from either source. */
+    onSetDrawReminder: (topicId: Int, title: String, drawAt: Long) -> Unit = { _, _, _ -> },
+    /** Takes that alarm back off the system; the same button does both. */
+    onCancelDrawReminder: (topicId: Int) -> Unit = {}
 ) {
     LaunchedEffect(topicId) { vm.open(topicId) }
     OnReturnToForeground(topicId) { vm.refreshIfStale() }
@@ -618,11 +628,37 @@ fun TopicScreen(
         // nothing else: 返回 / 板块名 / 收藏 / 刷新 is the whole list, so the
         // comment count lives in the 全部评论 header and the refresh state lives
         // in the action's own label.
+        // 追帖 is the app's own, and it sits in the bar's own local slot rather
+        // than taking 收藏's or 刷新's - which is also why it does not need a
+        // strip of page width below the bar. A guest gets it too: it wants the
+        // title and the reply count, both of which are on the page already.
+        val watched = store.readMark(topicId)?.watched == true
         DetailBar(
             title = detail?.forumName.orEmpty().ifBlank { "帖子" },
             onBack = onBack,
             action = if (vm.refreshing) "更新中" else "刷新",
             onAction = vm::refresh,
+            localAction = if (detail != null) (if (watched) "已追" else "追帖") else "",
+            localActive = watched,
+            onLocalAction = detail?.let { d ->
+                {
+                    val flipped = store.toggleWatch(
+                        topicId = topicId,
+                        title = d.title,
+                        total = d.commentCount
+                    )
+                    vm.showNotice(
+                        when {
+                            // Nothing happened, and a button that does nothing has
+                            // to say why.
+                            !flipped -> "追帖最多 ${Reading.WATCH_CAP} 个，先取消几个"
+                            store.readMark(topicId)?.watched == true ->
+                                "已追：有新回复会在「追帖」里显示"
+                            else -> "已取消追帖"
+                        }
+                    )
+                }
+            },
             // 收藏 is the site's, so the action only exists when the page
             // rendered the form - a guest gets 返回 / 板块名 / 刷新 and nothing
             // that would fail if pressed. The label is the site's own wording.
@@ -638,34 +674,51 @@ fun TopicScreen(
                     NoticeBar(vm.notice) { vm.clearNotice() }
                 }
 
-                // 追帖 / 读到哪儿了 / 开奖提醒: one strip of app-local actions,
-                // kept out of DetailBar because everything there is the site's.
-                LocalActionsRow(
-                    watched = store.readMark(topicId)?.watched == true,
-                    onWatch = {
-                        val added = store.toggleWatch(
-                            topicId = topicId,
-                            title = s.value.title,
-                            total = s.value.commentCount
-                        )
-                        if (!added && store.readMark(topicId)?.watched != true) {
-                            vm.showNotice("追帖最多 ${Reading.WATCH_CAP} 个，先取消几个")
-                        }
-                    },
-                    drawAt = s.value.opening?.let { drawTimeOf(it) } ?: 0L,
-                    onRemind = { at -> onSetDrawReminder(topicId, s.value.title, at) }
-                )
-
-                // 读到哪儿了: only while it still says something. Once the reader
-                // has jumped or dismissed it, it is gone for this visit.
-                val mark = resume
-                if (mark != null && !resumeDismissed && mark.seenFloor > 0) {
-                    ResumeBar(
-                        floor = mark.seenFloor,
-                        fresh = (s.value.commentCount - mark.seenTotal).coerceAtLeast(0),
-                        onJump = { vm.requestJumpTo(mark.seenFloor) },
-                        onDismiss = { resumeDismissed = true }
+                // 开奖提醒, for the one case the 抽奖卡 cannot cover: a
+                // hand-written 抽奖帖 that typed its 开奖时间 into the body. A
+                // site-made lottery renders a card instead, and there the button
+                // belongs on the card beside the time - so this strip stands down
+                // whenever the page printed one. Every other topic gets no strip
+                // at all, so the page opens on the post rather than on a button.
+                val drawAt =
+                    if (s.value.lottery != null) 0L
+                    else s.value.opening?.let { drawTimeOf(it) } ?: 0L
+                if (drawAt > 0L) {
+                    DrawReminderRow(
+                        drawAt = drawAt,
+                        reminded = store.reminder(Reminders.drawId(topicId)) != null,
+                        onRemind = { at -> onSetDrawReminder(topicId, s.value.title, at) },
+                        onCancel = { onCancelDrawReminder(topicId) }
                     )
+                }
+
+                // 读到哪儿了: a note about last time, not a fixture. It shows up,
+                // gives you about three seconds to reach for 回到那里, then takes
+                // itself away - a bar that stayed would sit above every screenful
+                // you read afterwards, having already said all it had to say.
+                // 回到那里 and 不用 still end it early.
+                val mark = resume
+                if (mark != null && mark.seenFloor > 0) {
+                    LaunchedEffect(topicId) {
+                        delay(RESUME_VISIBLE_MS)
+                        resumeDismissed = true
+                    }
+                    AnimatedVisibility(
+                        visible = !resumeDismissed,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
+                    ) {
+                        ResumeBar(
+                            floor = mark.seenFloor,
+                            fresh = (s.value.commentCount - mark.seenTotal).coerceAtLeast(0),
+                            onJump = {
+                                vm.requestJumpTo(mark.seenFloor)
+                                // Having jumped, the bar has nothing left to say.
+                                resumeDismissed = true
+                            },
+                            onDismiss = { resumeDismissed = true }
+                        )
+                    }
                 }
 
                 Refreshable(
@@ -684,7 +737,11 @@ fun TopicScreen(
                         onLogin = onLogin,
                         onRegister = onRegister,
                         onOpenLink = onOpenLink,
-                        onShare = { sharing = it }
+                        onShare = { sharing = it },
+                        onRemindDraw = { at ->
+                            onSetDrawReminder(topicId, s.value.title, at)
+                        },
+                        onCancelDraw = { onCancelDrawReminder(topicId) }
                     )
                 }
                 // A guest gets the §6.1 bar inside the flow instead of a composer
@@ -747,6 +804,9 @@ private fun TopicBody(
     onRegister: () -> Unit,
     onOpenLink: (String) -> Unit,
     onShare: (Post) -> Unit,
+    /** 开奖提醒, set from the 抽奖卡's own condition row. */
+    onRemindDraw: (Long) -> Unit = {},
+    onCancelDraw: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalTokens.current
@@ -828,7 +888,7 @@ private fun TopicBody(
             Gap(14)
             Column(modifier = Modifier.padding(horizontal = pad)) {
                 detail.opening?.let { opening ->
-                    AuthorLine(post = opening, onUser = onUser, onShare = { onShare(opening) })
+                    AuthorLine(post = opening, onUser = onUser)
                     Gap(14)
                 }
                 Text(
@@ -866,6 +926,20 @@ private fun TopicBody(
                             onImageClick = onOpenLink
                         )
                     }
+                    // 抽奖卡, in the site's own place: the end of .post-content,
+                    // under the body and above the actions. It carries 开奖时间 -
+                    // which the app never used to show at all - and 开奖提醒 rides
+                    // on that same line, beside the moment it would ring at.
+                    detail.lottery?.let { lottery ->
+                        Gap(14)
+                        LotteryCard(
+                            lottery = lottery,
+                            reminded = store.reminder(Reminders.drawId(detail.id)) != null,
+                            onRemind = onRemindDraw,
+                            onCancelRemind = onCancelDraw,
+                            onUser = onUser
+                        )
+                    }
                     // 主楼's 点赞打赏 goes through the site's donate modal, not the
                     // per-comment form, so it gets a real action here rather than
                     // the read-only count chip this used to be.
@@ -892,6 +966,15 @@ private fun TopicBody(
                         if (opening.likes > 0) {
                             MetaText("${opening.likes} 人点赞打赏")
                         }
+                        // 分享成图, on the right where a share affordance is looked
+                        // for. It needs no session and sends nothing anywhere - the
+                        // card is drawn from what is already on this screen.
+                        Spacer(Modifier.weight(1f))
+                        IconAction(
+                            glyph = ActionGlyph.SHARE,
+                            onClick = { onShare(opening) },
+                            description = "把主楼存成图片"
+                        )
                     }
                 }
                 Gap(20)
@@ -1003,7 +1086,7 @@ private const val COMMENTS_OFFSET = 2
 
 /** §5.2 作者行: identity only, at the head of the reading flow. */
 @Composable
-private fun AuthorLine(post: Post, onUser: (Int) -> Unit, onShare: (() -> Unit)? = null) {
+private fun AuthorLine(post: Post, onUser: (Int) -> Unit) {
     val tokens = LocalTokens.current
     Row(verticalAlignment = Alignment.CenterVertically) {
         UserAvatar(
@@ -1132,6 +1215,16 @@ private fun CommentView(
                         },
                         filled = post.liked || post.coined,
                         enabled = !post.coined
+                    )
+                }
+                // 分享成图: this one reply, as a card. Last in the row because it
+                // is the only action here that never touches the site.
+                if (onShare != null) {
+                    MetaDot()
+                    IconAction(
+                        glyph = ActionGlyph.SHARE,
+                        onClick = onShare,
+                        description = "把这一楼存成图片"
                     )
                 }
             }
@@ -1538,48 +1631,69 @@ private fun ReplyBar(
 /*
  * ---- the app's own bars ------------------------------------------------------
  *
- * Everything below is device-local: 追帖, 读到哪儿了, 开奖提醒, 本地折叠. None of
- * it has a server side, which is why it is drawn apart from DetailBar - that bar
- * carries the site's actions (收藏, 刷新) and mixing the two would suggest these
- * were the site's too.
+ * Everything below is device-local: 读到哪儿了, 开奖提醒, 本地折叠. None of it
+ * has a server side. 追帖 is device-local too, but it lives in DetailBar's own
+ * local slot rather than down here - it is a switch you reach for while reading,
+ * and a strip of page width is a lot to spend on one button. That slot is
+ * separate from the site's two, and the pill lights up when 追帖 is on, so
+ * nothing up there suggests linux.sb knows about it.
  */
 
-/** 追帖 + 开奖提醒, one compact strip under the bar. */
+/**
+ * 开奖提醒, for a 抽奖帖 with no 抽奖卡 - one whose author typed the time into the
+ * body. [LotteryCard] handles every site-made draw and puts the button on the
+ * card's own condition row; this strip is what is left over.
+ *
+ * It **prints the time as well as the button**, because a button alone was the
+ * whole bug: 「开奖提醒」 with no moment beside it gives the reader nothing to check
+ * the alarm against, and the time was nowhere else on screen either.
+ */
 @Composable
-private fun LocalActionsRow(
-    watched: Boolean,
-    onWatch: () -> Unit,
+private fun DrawReminderRow(
     drawAt: Long,
-    onRemind: (Long) -> Unit
+    reminded: Boolean,
+    onRemind: (Long) -> Unit,
+    onCancel: () -> Unit
 ) {
     val tokens = LocalTokens.current
+    val now = remember(drawAt) { System.currentTimeMillis() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = SbMetrics.pagePadding, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        SmallAction(
-            text = if (watched) "已追" else "追帖",
-            primary = watched,
-            onClick = onWatch
+        Text(
+            text = "开奖 " + Reminders.whenText(drawAt, now),
+            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+            color = tokens.textPrimary,
+            maxLines = 1
         )
-        if (drawAt > 0L) {
-            Spacer(Modifier.width(8.dp))
-            SmallAction("开奖提醒", primary = false, onClick = { onRemind(drawAt) })
-        }
-        Spacer(Modifier.weight(1f))
-        if (watched) {
-            Text(
-                text = "有新回复会在「追帖」里显示",
-                style = MaterialTheme.typography.labelSmall,
-                color = tokens.textTertiary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
+        Spacer(Modifier.width(10.dp))
+        SmallAction(
+            text = if (reminded) "已设提醒" else "开奖提醒",
+            primary = false,
+            onClick = { if (reminded) onCancel() else onRemind(drawAt) }
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (reminded) "到点响一次，再按一下取消" else "本机闹钟，不联网",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.textTertiary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
+
+/**
+ * How long 读到哪儿了 stays on screen before it withdraws on its own.
+ *
+ * Three seconds is long enough to read one short line and tap 回到那里, and short
+ * enough that the thread is not being read around a bar. Nothing depends on the
+ * reader dismissing it, so nothing has to wait for them to.
+ */
+private const val RESUME_VISIBLE_MS = 3_000L
 
 /**
  * 读到哪儿了.
@@ -1587,6 +1701,10 @@ private fun LocalActionsRow(
  * Two facts, both arithmetic on a page that was just fetched: where you stopped,
  * and how many replies have landed since. Nothing about the thread is stored - the
  * count is the live number minus the one recorded last time.
+ *
+ * It is drawn for [RESUME_VISIBLE_MS] and then removed, which is why the position
+ * it names is also still recorded: missing the window costs nothing, because the
+ * mark is not going anywhere and the bar comes back next time the topic is opened.
  */
 @Composable
 private fun ResumeBar(floor: Int, fresh: Int, onJump: () -> Unit, onDismiss: () -> Unit) {
