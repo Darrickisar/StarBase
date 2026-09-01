@@ -97,6 +97,20 @@ data class Post(
      * is one the site already treats as a long discussion.
      */
     val isHot: Boolean get() = replyCount > SiteRules.THREAD_COLLAPSE_LIMIT
+
+    /**
+     * The body as running text: what a reader would read out loud.
+     *
+     * Images and quote furniture contribute nothing, so a 本地屏蔽 keyword tests
+     * against words that are actually in the post, and a 分享成图 card wraps the
+     * same text the screen shows.
+     */
+    val plainText: String
+        get() = blocks
+            .filter { it.type != LiveBlock.Type.IMAGE }
+            .map { it.text.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\n")
 }
 
 /** A piece of post content. Images carry an absolute URL. */
@@ -295,21 +309,77 @@ data class Board(
     val rows: List<RankRowData> = emptyList()
 )
 
-/** Unread counters from /notify. */
+/**
+ * The unread badge, from `/notification_live_badge_status`.
+ *
+ * [messages] has no source: the site publishes a counter for 通知 only, and its
+ * own 私信 link carries no badge. It stays 0 rather than being guessed at, and
+ * the 私信 screen shows its own per-conversation unread marks instead.
+ */
 data class NotifyState(
     val notifications: Int = 0,
     val messages: Int = 0,
     val signedIn: Boolean = false
 )
 
-/** A notification row. */
+/**
+ * A notification row, off `/user/{id}?tab=notifications`.
+ *
+ * [text] is the sentence the site wrote, with the actor's name and the trailing
+ * 「查看主题」 link text left out - both of those are carried separately, and
+ * repeating them inside the sentence is what made the old rows read twice.
+ *
+ * [href] is the *topic* the notification is about, not the actor's profile. The
+ * row links to both, and the profile link comes first in the markup, so taking
+ * the first anchor sent every tap to the wrong place.
+ */
 data class NotifyItem(
     val text: String,
     val timeText: String = "",
     val href: String = "",
     val unread: Boolean = false,
     val actor: String = "",
-    val avatar: String = ""
+    val actorId: Int = 0,
+    val avatar: String = "",
+    /** The site's own badge: 通知 / 提及. Blank when it printed none. */
+    val kind: String = ""
+)
+
+/**
+ * One row of 我的积分记录, off `/user/{id}?tab=points_rewards`.
+ *
+ * This is the site's ledger, not a local tally: every row came from the page
+ * that was just fetched. [delta] is signed and [reason] is the site's own
+ * wording, so a rule the site adds later needs no change here.
+ */
+data class PointsEntry(
+    val reason: String,
+    val delta: Int,
+    /** The site's `<time datetime>`, already formatted for display. */
+    val timeText: String = "",
+    /** ISO stamp as the site wrote it. Kept for sorting, not shown. */
+    val at: String = "",
+    /** The topic the change was about, when there was one. */
+    val topicId: Int = 0,
+    val topicTitle: String = ""
+)
+
+/** One 积分规则 card the site prints under the ledger. */
+data class PointsRule(
+    val action: String,
+    val value: String,
+    /** True for 不启用 - the site marks those with its own class. */
+    val disabled: Boolean = false
+)
+
+/** A page of 我的积分记录. */
+data class PointsPage(
+    val entries: List<PointsEntry> = emptyList(),
+    val rules: List<PointsRule> = emptyList(),
+    val page: Int = 1,
+    val lastPage: Int = 1,
+    /** 积分规则's own one-line explanation, as the site worded it. */
+    val ruleNote: String = ""
 )
 
 /** A direct-message conversation summary. */
@@ -344,14 +414,26 @@ data class Profile(
 )
 
 /**
- * The three lists a profile page can show. The site switches them with `?tab=`
- * and renders all three as the same `li.post-item` rows, so one parser covers
- * them - 回帖 additionally carries an excerpt of what was written.
+ * The three *topic lists* a profile page can show. The site switches them with
+ * `?tab=` and renders all three as the same `li.post-item` rows, so one parser
+ * covers them - 回帖 additionally carries an excerpt of what was written.
+ *
+ * The page has two more tabs, 通知 and 积分, and they are deliberately not in
+ * here: neither one is a list of topics, so neither can be read by the profile
+ * parser or drawn by the profile screen. They have their own screens.
  */
 enum class ProfileTab(val key: String, val label: String) {
     TOPICS("topics", "主题"),
     REPLIES("replies", "回帖"),
-    FAVORITES("favorites", "收藏")
+    FAVORITES("favorites", "收藏");
+
+    companion object {
+        /** 通知's `?tab=` key. Read by [StarBase.Android.Forum.net.Api.notifications]. */
+        const val NOTIFICATIONS = "notifications"
+
+        /** 我的积分记录's `?tab=` key. */
+        const val POINTS = "points_rewards"
+    }
 }
 
 // ---- 称号馆 -------------------------------------------------------------------

@@ -34,9 +34,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import StarBase.Android.Forum.BuildConfig
+import StarBase.Android.Forum.data.Reading
 import StarBase.Android.Forum.data.ThemeMode
 import StarBase.Android.Forum.data.UpdateCheck
 import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.notify.Alarms
 import StarBase.Android.Forum.net.Github
 import StarBase.Android.Forum.net.ReleaseInfo
 import StarBase.Android.Forum.net.Releases
@@ -229,7 +231,10 @@ fun AppSettingsScreen(
     store: UserStore,
     vm: UpdateViewModel,
     onBack: () -> Unit,
-    onHistory: () -> Unit
+    onHistory: () -> Unit,
+    onWatch: () -> Unit,
+    onReminders: () -> Unit,
+    onBlocks: () -> Unit
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { vm.autoCheck(store) }
@@ -244,6 +249,9 @@ fun AppSettingsScreen(
             item("update") { Gap(12); UpdateCard(store = store, vm = vm) }
             item("theme") { Gap(12); ThemeCard(store = store) }
             item("history") { Gap(12); HistoryCard(store = store, onOpen = onHistory) }
+            item("reading") { Gap(12); ReadingCard(store = store, onWatch = onWatch) }
+            item("reminders") { Gap(12); RemindersCard(store = store, onOpen = onReminders) }
+            item("blocks") { Gap(12); BlocksCard(store = store, onOpen = onBlocks) }
             item("local") { Gap(12); LocalDataCard() }
             item("about") {
                 Gap(12)
@@ -531,6 +539,105 @@ private fun HistoryCard(store: UserStore, onOpen: () -> Unit) {
 }
 
 /**
+ * 读到哪儿了 + 追帖.
+ *
+ * Both live off one stored list, so they share a card. The number that matters to
+ * someone reading this page is how many topics are being watched, because that is
+ * the only thing here that costs requests - and only when the board is opened.
+ */
+@Composable
+private fun ReadingCard(store: UserStore, onWatch: () -> Unit) {
+    val tokens = LocalTokens.current
+    val watched = Reading.watched(store.readMarks).size
+    SbCard(modifier = cardWidth(), padding = 14.dp) {
+        CardTitle(
+            text = "读到哪儿了 / 追帖",
+            tail = if (watched == 0) "" else "追 $watched 个"
+        )
+        Gap(5)
+        Text(
+            text = "记的是你自己读到第几楼、当时有多少条回复，好在下次打开时问一句要不要接着看。" +
+                "站点没有这个，所以它只在这台手机上，也不会传上去。",
+            style = MaterialTheme.typography.bodySmall,
+            color = tokens.textSecondary
+        )
+        Gap(7)
+        Text(
+            text = "追帖看板会把你追的帖子一次全取回来，看哪些多了回复——" +
+                "一个帖子一次请求，而且只在你打开那一页的时候。没有后台任务。",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.textTertiary
+        )
+        Gap(12)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SmallAction("追帖看板", primary = true, onClick = onWatch)
+            SmallAction(
+                text = if (store.keepReadMarks) "记录：开" else "记录：关",
+                primary = false,
+                onClick = { store.updateKeepReadMarks(!store.keepReadMarks) }
+            )
+            if (store.readMarks.isNotEmpty()) {
+                SmallAction("清空", primary = false, onClick = store::clearReadMarks)
+            }
+        }
+    }
+}
+
+/** 本机提醒. A clock on this device, which the card says in as many words. */
+@Composable
+private fun RemindersCard(store: UserStore, onOpen: () -> Unit) {
+    val tokens = LocalTokens.current
+    val context = LocalContext.current
+    val count = store.reminders.size
+    SbCard(modifier = cardWidth(), padding = 14.dp) {
+        CardTitle(text = "本机提醒", tail = if (count == 0) "" else "$count 个")
+        Gap(5)
+        Text(
+            text = "到点弹一条本机通知，用的是系统的定时器。不联网、不轮询、也不是推送，" +
+                "App 关着的时候它什么都不做，响的时候也没去站点看过。",
+            style = MaterialTheme.typography.bodySmall,
+            color = tokens.textSecondary
+        )
+        if (!Alarms.canNotify(context)) {
+            Gap(7)
+            Text(
+                text = "系统通知现在是关着的，提醒不会弹出来。",
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.textTertiary
+            )
+        }
+        Gap(12)
+        SmallAction("管理提醒", primary = true, onClick = onOpen)
+    }
+}
+
+/** 本地屏蔽. The card names the site's own filter rather than implying uniqueness. */
+@Composable
+private fun BlocksCard(store: UserStore, onOpen: () -> Unit) {
+    val tokens = LocalTokens.current
+    val enabled = store.blockRules.count { it.enabled }
+    SbCard(modifier = cardWidth(), padding = 14.dp) {
+        CardTitle(text = "本地屏蔽", tail = if (enabled == 0) "" else "$enabled 条")
+        Gap(5)
+        Text(
+            text = "命中的帖子在列表里藏起来，命中的回帖折叠成一行，点开还能看。" +
+                "只是显示的时候不给你看，没有删掉任何东西，规则一关就全回来了。",
+            style = MaterialTheme.typography.bodySmall,
+            color = tokens.textSecondary
+        )
+        Gap(7)
+        Text(
+            text = "网页版首页也有一个「屏蔽设置」，那份存在站点上、只管首页、只按关键词。" +
+                "这里的规则板块页和搜索结果也算，还能折叠某个人的回帖。两者互不影响。",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.textTertiary
+        )
+        Gap(12)
+        SmallAction("管理规则", primary = true, onClick = onOpen)
+    }
+}
+
+/**
  * 本机数据. Kept as a card because the honest answer is short and worth stating:
  * the app stores no linux.sb content at all, so there is nothing here to clear.
  */
@@ -542,14 +649,16 @@ private fun LocalDataCard() {
         Gap(5)
         Text(
             text = "站点的内容一律不落地：帖子、收藏、通知、私信都是每次打开现取的。" +
-                "本机存的是外观、检查更新的时机、上次查到的版本号，以及上面那份浏览历史。",
+                "本机存的是外观、检查更新的时机、上次查到的版本号，以及上面那几样——" +
+                "浏览历史、读到哪儿了、追的帖子、提醒、屏蔽规则。",
             style = MaterialTheme.typography.bodySmall,
             color = tokens.textSecondary
         )
         Gap(7)
         Text(
             text = "收藏是网站上的收藏，不是本机的列表，所以在网页上取消，App 里也就没了。" +
-                "浏览历史反过来——站点没这个功能，所以它只在这台手机上。",
+                "上面那几样反过来——记的都是你在这台手机上做过什么，" +
+                "不是站点内容的副本，站点也看不到。",
             style = MaterialTheme.typography.labelSmall,
             color = tokens.textTertiary
         )

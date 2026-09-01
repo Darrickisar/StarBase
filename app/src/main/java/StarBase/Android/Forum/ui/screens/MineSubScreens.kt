@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -40,10 +41,12 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Conversation
+import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
+import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
@@ -59,6 +62,8 @@ import StarBase.Android.Forum.ui.Refreshable
 import StarBase.Android.Forum.ui.SmallAction
 import StarBase.Android.Forum.ui.ageLabel
 import StarBase.Android.Forum.ui.freshnessText
+import StarBase.Android.Forum.ui.components.BlockedNote
+import StarBase.Android.Forum.ui.components.BlockedRow
 import StarBase.Android.Forum.ui.components.Chip
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.SbCard
@@ -88,24 +93,48 @@ class NotifyViewModel : ViewModel() {
     private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS)
     private var inFlight = false
 
+    /**
+     * Whose notifications these are. The list is a tab on your own profile, so
+     * there is nothing to fetch until the session says who that is.
+     */
+    private var userId = 0
+
     val ageSeconds: Long get() = fresh.ageSeconds
 
+    /**
+     * Points this at a user. Signing in as someone else drops what is on screen
+     * rather than showing the previous account's notifications under the new name.
+     */
+    fun bind(id: Int) {
+        if (id == userId) return
+        userId = id
+        state = Load.Loading
+        fresh.invalidate()
+    }
+
     fun load(force: Boolean = false) {
+        if (userId <= 0) return
         if (state is Load.Ready && !force) return
         if (inFlight) return
         inFlight = true
+        val requested = userId
         viewModelScope.launch {
             // Only blank the screen on the first load; a refresh keeps the list
             // visible so it does not flash empty.
             if (state !is Load.Ready) state = Load.Loading else refreshing = true
             try {
-                state = Load.Ready(Api.notifications())
+                val items = Api.notifications(requested)
+                if (requested != userId) return@launch
+                state = Load.Ready(items)
                 fresh.mark()
             } catch (e: Throwable) {
+                if (requested != userId) return@launch
                 if (state !is Load.Ready) state = failureOf(e)
             } finally {
-                refreshing = false
-                inFlight = false
+                if (requested == userId) {
+                    refreshing = false
+                    inFlight = false
+                }
             }
         }
     }
@@ -120,12 +149,16 @@ class NotifyViewModel : ViewModel() {
 fun NotificationsScreen(
     vm: NotifyViewModel,
     signedIn: Boolean,
+    userId: Int,
     onBack: () -> Unit,
     onLogin: () -> Unit,
     onOpenHref: (String) -> Unit
 ) {
+    // The list is a tab on your own profile, so it cannot be fetched before the
+    // session has resolved who you are.
+    LaunchedEffect(userId) { if (userId > 0) vm.bind(userId) }
     // Covers both the first appearance and every return to the foreground.
-    OnReturnToForeground(signedIn) { if (signedIn) vm.openOrRefresh() }
+    OnReturnToForeground(signedIn to userId) { if (signedIn && userId > 0) vm.openOrRefresh() }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         DetailBar(
@@ -183,6 +216,27 @@ private fun NotifyRow(item: NotifyItem, onClick: () -> Unit) {
             Spacer(Modifier.width(9.dp))
         }
         Column(modifier = Modifier.weight(1f)) {
+            // Actor and 通知/提及 first: the sentence below no longer repeats
+            // either of them, so this line is what says who and what kind.
+            if (item.actor.isNotBlank() || item.kind.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (item.actor.isNotBlank()) {
+                        Text(
+                            text = item.actor,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = tokens.textSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                    if (item.kind.isNotBlank()) {
+                        Spacer(Modifier.width(6.dp))
+                        Chip(text = item.kind)
+                    }
+                }
+                Gap(3)
+            }
             Text(
                 text = item.text,
                 style = MaterialTheme.typography.bodyMedium,
@@ -879,6 +933,8 @@ fun ProfileScreen(
     vm: ProfileViewModel,
     titleOverride: String = "",
     startTab: ProfileTab = ProfileTab.TOPICS,
+    /** 本地屏蔽 rules, applied to the three topic tabs. */
+    store: UserStore,
     onBack: () -> Unit,
     onTopic: (Int) -> Unit,
     onLogin: () -> Unit,
@@ -886,6 +942,8 @@ fun ProfileScreen(
 ) {
     LaunchedEffect(userId, startTab) { vm.open(userId, startTab) }
     OnReturnToForeground(userId) { vm.refreshIfStale() }
+
+    var revealBlocked by remember(userId) { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         val loaded = (vm.state as? Load.Ready)?.value
@@ -949,13 +1007,37 @@ fun ProfileScreen(
                         )
                     }
                 } else {
-                    itemsIndexed(s.value.topics, key = { index, t -> "${t.id}-$index" }) { index, topic ->
+                    // A 屏蔽 rule applies here too, including on your own profile -
+                    // and the count below says so rather than leaving a short list.
+                    val filtered = Filters.topics(store.blockRules, s.value.topics)
+                    itemsIndexed(
+                        filtered.visible,
+                        key = { index, t -> "${t.id}-$index" }
+                    ) { index, topic ->
                         if (index > 0) Hairline(startInset = 66)
                         TopicRow(
                             topic = topic,
                             onClick = { onTopic(topic.id) },
                             showForum = true
                         )
+                    }
+                    if (filtered.hiddenCount > 0) {
+                        item("blocked") {
+                            Hairline(startInset = 66)
+                            BlockedNote(
+                                count = filtered.hiddenCount,
+                                revealed = revealBlocked,
+                                onToggle = { revealBlocked = !revealBlocked }
+                            )
+                        }
+                        if (revealBlocked) {
+                            itemsIndexed(
+                                filtered.hidden,
+                                key = { index, b -> "blocked-${b.item.id}-$index" }
+                            ) { _, blocked ->
+                                BlockedRow(blocked) { onTopic(blocked.item.id) }
+                            }
+                        }
                     }
                 }
                 item("tail") { Gap(24) }

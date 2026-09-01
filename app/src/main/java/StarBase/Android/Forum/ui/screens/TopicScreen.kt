@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +44,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.FavoriteMark
 import StarBase.Android.Forum.data.Post
+import StarBase.Android.Forum.data.Reading
 import StarBase.Android.Forum.data.TopicDetail
+import StarBase.Android.Forum.data.Filters
+import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.ui.components.SharePostSheet
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.ui.EmptyPanel
 import StarBase.Android.Forum.ui.ErrorPanel
@@ -55,6 +60,7 @@ import StarBase.Android.Forum.ui.Load
 import StarBase.Android.Forum.ui.LoadingMark
 import StarBase.Android.Forum.ui.OnReturnToForeground
 import StarBase.Android.Forum.ui.Refreshable
+import StarBase.Android.Forum.ui.SmallAction
 import StarBase.Android.Forum.ui.components.MetaDot
 import StarBase.Android.Forum.ui.components.MetaRow
 import StarBase.Android.Forum.ui.components.ActionGlyph
@@ -140,6 +146,13 @@ class TopicViewModel : ViewModel() {
 
     /** Shorter window than a feed: replies land in an open thread quickly. */
     private val fresh = Freshness(windowMs = 45_000L)
+
+    /**
+     * Ceiling on the automatic paging 读到哪儿了 does. A reader who stopped at floor
+     * 900 gets as far as this takes them and the ordinary 加载更多 does the rest -
+     * better than an unbounded loop of requests off one tap.
+     */
+    private val MAX_AUTO_PAGES = 8
 
     /** One request at a time; a pull and the resume hook can coincide. */
     private var inFlight = false
@@ -465,6 +478,56 @@ class TopicViewModel : ViewModel() {
         }
     }
 
+    /**
+     * A floor the screen has been asked to scroll to, or 0 for none.
+     *
+     * Held here rather than in the composable because the list it scrolls is
+     * inside [TopicBody], and the request comes from a bar outside it. The screen
+     * clears it once it has acted.
+     */
+    var jumpTo by mutableStateOf(0)
+        private set
+
+    fun requestJumpTo(floor: Int) { if (floor > 0) jumpTo = floor }
+
+    fun jumpHandled() { jumpTo = 0 }
+
+    /**
+     * Pages forward until [floor] is loaded, or until the thread runs out.
+     *
+     * 读到哪儿了 on a long thread usually points past page one, and the mark would
+     * otherwise land on "as far as page one goes" and quietly under-deliver.
+     */
+    fun loadUntilFloor(floor: Int) {
+        if (floor <= 0 || loadingMore) return
+        val requested = topicId
+        viewModelScope.launch {
+            var guard = 0
+            while (
+                requested == topicId &&
+                hasMore &&
+                comments.none { it.floor >= floor } &&
+                guard < MAX_AUTO_PAGES
+            ) {
+                guard += 1
+                loadingMore = true
+                try {
+                    val next = Api.topic(requested, page + 1)
+                    if (requested != topicId) return@launch
+                    val known = comments.mapTo(HashSet()) { it.id }
+                    comments += next.comments.filter { it.id !in known }
+                    page += 1
+                    lastPage = maxOf(lastPage, next.lastPage)
+                } catch (e: Throwable) {
+                    if (requested == topicId) notice = e.message ?: "加载更多失败"
+                    return@launch
+                } finally {
+                    if (requested == topicId) loadingMore = false
+                }
+            }
+        }
+    }
+
     fun clearNotice() { notice = "" }
 
     /** For failures the screen sees before the ViewModel is involved. */
@@ -476,16 +539,33 @@ fun TopicScreen(
     topicId: Int,
     vm: TopicViewModel,
     signedIn: Boolean,
+    /** Device-local state: reading position, 追帖, and the 屏蔽 rules. */
+    store: UserStore,
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onBack: () -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
-    onOpenLink: (String) -> Unit
+    onOpenLink: (String) -> Unit,
+    /** Offers 开奖提醒 when the opening post prints a draw time. */
+    onSetDrawReminder: (topicId: Int, title: String, drawAt: Long) -> Unit = { _, _, _ -> }
 ) {
     LaunchedEffect(topicId) { vm.open(topicId) }
     OnReturnToForeground(topicId) { vm.refreshIfStale() }
+
+    /*
+     * 读到哪儿了.
+     *
+     * The mark is read once per topic, *before* anything is recorded for this
+     * visit - otherwise the visit would overwrite the position it is meant to
+     * restore, and the banner would always say "0 new".
+     */
+    var resume by remember(topicId) { mutableStateOf(store.readMark(topicId)) }
+    var resumeDismissed by remember(topicId) { mutableStateOf(false) }
+
+    // 分享成图: which post the sheet is showing, or null when it is closed.
+    var sharing by remember { mutableStateOf<Post?>(null) }
 
     // 附件: the picker has to be remembered at the screen level, and what it yields
     // is markdown the reply bar appends to whatever is typed.
@@ -502,6 +582,23 @@ fun TopicScreen(
     val onAttach: ((String) -> Unit) -> Unit = { insert ->
         pendingInsert = insert
         pickFile()
+    }
+
+    /*
+     * Records the visit against the live count.
+     *
+     * [resume] was captured above, so this cannot clobber the position it is about
+     * to show. What it stores is the reply count the page just reported, which is
+     * the baseline the 「多了 N 条」 line counts from next time.
+     */
+    val detailForMark = (vm.state as? Load.Ready)?.value
+    LaunchedEffect(topicId, detailForMark?.commentCount, detailForMark?.title) {
+        val detail = detailForMark ?: return@LaunchedEffect
+        store.recordRead(
+            topicId = topicId,
+            total = detail.commentCount,
+            title = detail.title
+        )
     }
 
     // A reply the site will only take from a browser: hand it the page. The
@@ -540,6 +637,37 @@ fun TopicScreen(
                 if (vm.notice.isNotBlank()) {
                     NoticeBar(vm.notice) { vm.clearNotice() }
                 }
+
+                // 追帖 / 读到哪儿了 / 开奖提醒: one strip of app-local actions,
+                // kept out of DetailBar because everything there is the site's.
+                LocalActionsRow(
+                    watched = store.readMark(topicId)?.watched == true,
+                    onWatch = {
+                        val added = store.toggleWatch(
+                            topicId = topicId,
+                            title = s.value.title,
+                            total = s.value.commentCount
+                        )
+                        if (!added && store.readMark(topicId)?.watched != true) {
+                            vm.showNotice("追帖最多 ${Reading.WATCH_CAP} 个，先取消几个")
+                        }
+                    },
+                    drawAt = s.value.opening?.let { drawTimeOf(it) } ?: 0L,
+                    onRemind = { at -> onSetDrawReminder(topicId, s.value.title, at) }
+                )
+
+                // 读到哪儿了: only while it still says something. Once the reader
+                // has jumped or dismissed it, it is gone for this visit.
+                val mark = resume
+                if (mark != null && !resumeDismissed && mark.seenFloor > 0) {
+                    ResumeBar(
+                        floor = mark.seenFloor,
+                        fresh = (s.value.commentCount - mark.seenTotal).coerceAtLeast(0),
+                        onJump = { vm.requestJumpTo(mark.seenFloor) },
+                        onDismiss = { resumeDismissed = true }
+                    )
+                }
+
                 Refreshable(
                     refreshing = vm.refreshing,
                     onRefresh = vm::refresh,
@@ -549,12 +677,14 @@ fun TopicScreen(
                         vm = vm,
                         detail = s.value,
                         canReply = s.value.canReply || signedIn,
+                        store = store,
                         onUser = onUser,
                         onForum = onForum,
                         onTopic = onTopic,
                         onLogin = onLogin,
                         onRegister = onRegister,
-                        onOpenLink = onOpenLink
+                        onOpenLink = onOpenLink,
+                        onShare = { sharing = it }
                     )
                 }
                 // A guest gets the §6.1 bar inside the flow instead of a composer
@@ -587,6 +717,21 @@ fun TopicScreen(
             }
         }
     }
+
+    // 分享成图, over the thread. The card is drawn here so the preview and the
+    // exported bitmap are the same composable.
+    val shareTarget = sharing
+    val detail = (vm.state as? Load.Ready)?.value
+    if (shareTarget != null && detail != null) {
+        SharePostSheet(
+            post = shareTarget,
+            topicTitle = detail.title,
+            forumName = detail.forumName,
+            topicId = topicId,
+            onDismiss = { sharing = null },
+            onNotice = { vm.showNotice(it) }
+        )
+    }
 }
 
 @Composable
@@ -594,25 +739,96 @@ private fun TopicBody(
     vm: TopicViewModel,
     detail: TopicDetail,
     canReply: Boolean,
+    store: UserStore,
     onUser: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onTopic: (Int) -> Unit,
     onLogin: () -> Unit,
     onRegister: () -> Unit,
     onOpenLink: (String) -> Unit,
+    onShare: (Post) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val tokens = LocalTokens.current
     val listState = rememberLazyListState()
     val pad = SbMetrics.pagePadding
 
+    /*
+     * 本地折叠. A map of post id -> the rule that folded it, recomputed whenever
+     * the rules or the comments change. Nothing is removed from the list: a thread
+     * with #12 missing reads as though the site lost it.
+     */
+    val folded = remember(store.blockRules, vm.comments.size) {
+        Filters.posts(store.blockRules, vm.comments)
+    }
+    // Which folded replies the reader has opened anyway, this visit only.
+    val unfolded = remember(detail.id) { mutableStateListOf<String>() }
+
+    /*
+     * 读到哪儿了: the scroll half.
+     *
+     * The comments are laid out after exactly two fixed items - the reading flow
+     * and the 全部评论 header - so comment `n` is list item `n + COMMENTS_OFFSET`.
+     * That coupling is why the constant sits next to the LazyColumn below rather
+     * than being rediscovered from the layout at runtime.
+     */
+    LaunchedEffect(vm.jumpTo, vm.comments.size, vm.hasMore) {
+        val floor = vm.jumpTo
+        if (floor <= 0) return@LaunchedEffect
+        val index = vm.comments.indexOfFirst { it.floor >= floor }
+        if (index >= 0) {
+            listState.animateScrollToItem(index + COMMENTS_OFFSET)
+            vm.jumpHandled()
+        } else if (vm.hasMore) {
+            // The floor is on a page that has not been read yet. Ask for more;
+            // this effect runs again as they land.
+            vm.loadUntilFloor(floor)
+        } else {
+            // The thread is shorter than it was - the reply was deleted. Land on
+            // the last one there is rather than doing nothing.
+            if (vm.comments.isNotEmpty()) {
+                listState.animateScrollToItem(vm.comments.lastIndex + COMMENTS_OFFSET)
+            }
+            vm.jumpHandled()
+        }
+    }
+
+    /*
+     * Records the furthest floor scrolled into view.
+     *
+     * Read off the layout rather than from a scroll callback, so it costs nothing
+     * while the list is still - [snapshotFlow] only emits when the visible range
+     * changes. The index arithmetic is the inverse of the jump above.
+     */
+    LaunchedEffect(detail.id, vm.comments.size) {
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo
+                .maxOfOrNull { info ->
+                    val commentIndex = info.index - COMMENTS_OFFSET
+                    vm.comments.getOrNull(commentIndex)?.floor ?: 0
+                } ?: 0
+        }.collect { floor ->
+            if (floor > 0) {
+                store.recordRead(
+                    topicId = detail.id,
+                    floor = floor,
+                    total = detail.commentCount,
+                    title = detail.title
+                )
+            }
+        }
+    }
+
+    // Two items precede the comments, and 读到哪儿了 maps floors to list indices
+    // through that count - so anything inserted above the comment list has to be
+    // counted here too.
     LazyColumn(state = listState, modifier = modifier.fillMaxWidth()) {
         // §5.2 作者 -> 标题 -> 标签 -> 正文, one continuous flow, no card shell.
         item("head") {
             Gap(14)
             Column(modifier = Modifier.padding(horizontal = pad)) {
                 detail.opening?.let { opening ->
-                    AuthorLine(post = opening, onUser = onUser)
+                    AuthorLine(post = opening, onUser = onUser, onShare = { onShare(opening) })
                     Gap(14)
                 }
                 Text(
@@ -713,13 +929,25 @@ private fun TopicBody(
                 itemsIndexed(vm.comments, key = { i, p -> "${p.id}-$i" }) { index, post ->
                     // §6.5 分隔只用一条 1px 低透明度线, 不做独立卡片.
                     if (index > 0) Hairline(startInset = pad.value.toInt() + 45)
-                    CommentView(
-                        post = post,
-                        onUser = onUser,
-                        onOpenLink = onOpenLink,
-                        onQuote = if (canReply) ({ vm.quote(post) }) else null,
-                        onLike = if (canReply) ({ vm.askLike(post) }) else null
-                    )
+                    val rule = folded[post.id]
+                    if (rule != null && post.id !in unfolded) {
+                        // 本地折叠: one line saying which rule did it, and a way
+                        // past it. The reply is still here and still numbered.
+                        FoldedComment(
+                            post = post,
+                            reason = rule.value,
+                            onOpen = { unfolded += post.id }
+                        )
+                    } else {
+                        CommentView(
+                            post = post,
+                            onUser = onUser,
+                            onOpenLink = onOpenLink,
+                            onQuote = if (canReply) ({ vm.quote(post) }) else null,
+                            onLike = if (canReply) ({ vm.askLike(post) }) else null,
+                            onShare = { onShare(post) }
+                        )
+                    }
                 }
                 item("footer") {
                     ListFooter(vm.loadingMore, vm.hasMore, vm::loadMore)
@@ -764,9 +992,18 @@ private fun TopicBody(
     }
 }
 
+/**
+ * How many list items sit above the first comment in [TopicBody]'s LazyColumn:
+ * the reading flow, then the 全部评论 header.
+ *
+ * 读到哪儿了 converts between floors and list indices with this, in both
+ * directions, so an item added above the comment list has to be counted here.
+ */
+private const val COMMENTS_OFFSET = 2
+
 /** §5.2 作者行: identity only, at the head of the reading flow. */
 @Composable
-private fun AuthorLine(post: Post, onUser: (Int) -> Unit) {
+private fun AuthorLine(post: Post, onUser: (Int) -> Unit, onShare: (() -> Unit)? = null) {
     val tokens = LocalTokens.current
     Row(verticalAlignment = Alignment.CenterVertically) {
         UserAvatar(
@@ -815,7 +1052,8 @@ private fun CommentView(
     onUser: (Int) -> Unit,
     onOpenLink: (String) -> Unit,
     onQuote: (() -> Unit)? = null,
-    onLike: (() -> Unit)? = null
+    onLike: (() -> Unit)? = null,
+    onShare: (() -> Unit)? = null
 ) {
     val tokens = LocalTokens.current
     val hot = post.isHot
@@ -1295,4 +1533,155 @@ private fun ReplyBar(
             )
         }
     }
+}
+
+/*
+ * ---- the app's own bars ------------------------------------------------------
+ *
+ * Everything below is device-local: 追帖, 读到哪儿了, 开奖提醒, 本地折叠. None of
+ * it has a server side, which is why it is drawn apart from DetailBar - that bar
+ * carries the site's actions (收藏, 刷新) and mixing the two would suggest these
+ * were the site's too.
+ */
+
+/** 追帖 + 开奖提醒, one compact strip under the bar. */
+@Composable
+private fun LocalActionsRow(
+    watched: Boolean,
+    onWatch: () -> Unit,
+    drawAt: Long,
+    onRemind: (Long) -> Unit
+) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        SmallAction(
+            text = if (watched) "已追" else "追帖",
+            primary = watched,
+            onClick = onWatch
+        )
+        if (drawAt > 0L) {
+            Spacer(Modifier.width(8.dp))
+            SmallAction("开奖提醒", primary = false, onClick = { onRemind(drawAt) })
+        }
+        Spacer(Modifier.weight(1f))
+        if (watched) {
+            Text(
+                text = "有新回复会在「追帖」里显示",
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.textTertiary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * 读到哪儿了.
+ *
+ * Two facts, both arithmetic on a page that was just fetched: where you stopped,
+ * and how many replies have landed since. Nothing about the thread is stored - the
+ * count is the live number minus the one recorded last time.
+ */
+@Composable
+private fun ResumeBar(floor: Int, fresh: Int, onJump: () -> Unit, onDismiss: () -> Unit) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(tokens.accentWarm.copy(alpha = 0.10f))
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "上次读到 $floor 楼",
+                style = MaterialTheme.typography.labelLarge,
+                color = tokens.textPrimary
+            )
+            if (fresh > 0) {
+                Gap(2)
+                Text(
+                    text = "自你上次看之后多了 $fresh 条",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textSecondary
+                )
+            }
+        }
+        SmallAction("回到那里", primary = true, onClick = onJump)
+        Spacer(Modifier.width(6.dp))
+        SmallAction("不用", primary = false, onClick = onDismiss)
+    }
+}
+
+/**
+ * 本地折叠: a reply a rule matched.
+ *
+ * Folded in place rather than removed. The floor number stays visible, so a reply
+ * that answers this one still makes sense, and one tap opens it - the rule hides
+ * it, it does not delete it.
+ */
+@Composable
+private fun FoldedComment(post: Post, reason: String, onOpen: () -> Unit) {
+    val tokens = LocalTokens.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (post.floor > 0) "${post.floor} 楼" else "回帖",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.textTertiary
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "已按「$reason」折叠",
+            style = MaterialTheme.typography.labelMedium,
+            color = tokens.textTertiary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "展开",
+            style = MaterialTheme.typography.labelSmall,
+            color = tokens.textSecondary
+        )
+    }
+}
+
+/**
+ * The draw time an 抽奖帖 printed, as epoch millis, or 0 when there is none.
+ *
+ * Read out of the opening post's own text rather than from a field, because the
+ * site has no field for it - a lottery topic writes its deadline into the body.
+ * Only the formats the site actually uses are accepted; anything else returns 0
+ * and the 开奖提醒 action simply does not appear, which is the right failure for a
+ * feature built on someone else's prose.
+ */
+internal fun drawTimeOf(opening: Post): Long {
+    val text = opening.plainText
+    if (text.isBlank()) return 0L
+    // 「开奖时间：2026-09-05 20:00」 and the variants that drop the colon, use a
+    // slash, or leave out the minutes.
+    val m = Regex(
+        """开奖(?:时间)?\s*[:：]?\s*(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?(?:\s+(\d{1,2})[:：](\d{2}))?"""
+    ).find(text) ?: return 0L
+    val (y, mo, d) = m.destructured.toList().take(3).map { it.toIntOrNull() ?: return 0L }
+    val hour = m.groupValues[4].toIntOrNull() ?: 0
+    val minute = m.groupValues[5].toIntOrNull() ?: 0
+    if (mo !in 1..12 || d !in 1..31 || hour !in 0..23 || minute !in 0..59) return 0L
+    return java.util.Calendar.getInstance().apply {
+        clear()
+        set(y, mo - 1, d, hour, minute)
+    }.timeInMillis
 }

@@ -47,7 +47,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import StarBase.Android.Forum.data.Reminder
+import StarBase.Android.Forum.data.Reminders
 import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.notify.Alarms
 import StarBase.Android.Forum.net.Site
 import StarBase.Android.Forum.ui.components.NavGlyph
 import StarBase.Android.Forum.ui.components.NavIcon
@@ -80,6 +83,12 @@ import StarBase.Android.Forum.ui.screens.NewTopicScreen
 import StarBase.Android.Forum.ui.screens.NewTopicViewModel
 import StarBase.Android.Forum.ui.screens.NotificationsScreen
 import StarBase.Android.Forum.ui.screens.NotifyViewModel
+import StarBase.Android.Forum.ui.screens.PointsScreen
+import StarBase.Android.Forum.ui.screens.PointsViewModel
+import StarBase.Android.Forum.ui.screens.BlockScreen
+import StarBase.Android.Forum.ui.screens.RemindersScreen
+import StarBase.Android.Forum.ui.screens.WatchScreen
+import StarBase.Android.Forum.ui.screens.WatchViewModel
 import StarBase.Android.Forum.ui.screens.ThreadScreen
 import StarBase.Android.Forum.ui.screens.ThreadViewModel
 import StarBase.Android.Forum.ui.screens.ProfileScreen
@@ -121,6 +130,8 @@ sealed interface Route {
     data object Rank : Route
     data object Gacha : Route
     data object Notifications : Route
+    /** 我的积分记录. The site's ledger, off your own profile tab. */
+    data object Points : Route
     data object Messages : Route
     /** One private-message thread, keyed by the other person's user id. */
     data class Thread(val partnerId: Int) : Route
@@ -131,6 +142,12 @@ sealed interface Route {
     data object AppSettings : Route
     /** 浏览历史. The app's own record, so this one needs no session either. */
     data object History : Route
+    /** 追帖看板. Local list, but opening it fetches the topics on it. */
+    data object Watch : Route
+    /** 本机提醒. Alarms on this device; no session needed. */
+    data object Reminders : Route
+    /** 本地屏蔽. Rules on this device; no session needed. */
+    data object Blocks : Route
     data class Login(val register: Boolean = false) : Route
     /**
      * A site page in a WebView. [offSite] is for the one errand that has to
@@ -158,16 +175,25 @@ private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     Route.Rank -> "rank"
     Route.Gacha -> "gacha"
     Route.Notifications -> "notifications"
+    Route.Points -> "points"
     Route.Messages -> "messages"
     is Route.Thread -> "thread:${route.partnerId}"
     is Route.NewTopic -> "new-topic"
     Route.Settings -> "settings"
     Route.AppSettings -> "app-settings"
     Route.History -> "history"
+    Route.Watch -> "watch"
+    Route.Reminders -> "reminders"
+    Route.Blocks -> "blocks"
 }
 
 @Composable
-fun Shell(store: UserStore) {
+fun Shell(
+    store: UserStore,
+    /** A topic a 本机提醒 asked to open, or 0. Consumed once. */
+    openTopicId: Int = 0,
+    onTopicOpened: () -> Unit = {}
+) {
     val context = LocalContext.current
     val session: SessionViewModel = viewModel()
     val home: HomeViewModel = viewModel()
@@ -177,6 +203,8 @@ fun Shell(store: UserStore) {
     val explore: ExploreViewModel = viewModel()
     val rank: RankViewModel = viewModel()
     val notify: NotifyViewModel = viewModel()
+    val points: PointsViewModel = viewModel()
+    val watch: WatchViewModel = viewModel()
     val thread: ThreadViewModel = viewModel()
     val newTopic: NewTopicViewModel = viewModel()
     val messages: MessagesViewModel = viewModel()
@@ -205,6 +233,14 @@ fun Shell(store: UserStore) {
     // 检查更新 on the schedule the user picked. Once per process and only if it
     // is owed, so 只手动检查 really means silent - see UpdateCheck.due.
     LaunchedEffect(Unit) { update.autoCheck(store) }
+
+    // 本机提醒: alarms do not survive a reboot or an app update, and the stored
+    // list is the only record of them - so everything still due is re-armed once
+    // per process. This sets timers; it makes no requests.
+    LaunchedEffect(Unit) {
+        store.pruneReminders()
+        Alarms.rearm(context, store.reminders)
+    }
 
     fun push(route: Route) { stack.add(route) }
 
@@ -266,6 +302,42 @@ fun Shell(store: UserStore) {
             abs.startsWith(Site.BASE) -> openSitePage("网页", abs)
             else -> openInBrowser(context, abs)
         }
+    }
+
+    // A 开奖提醒 that was tapped. Handled here rather than in the Activity so it
+    // goes through the same openTopic that records a visit.
+    LaunchedEffect(openTopicId) {
+        if (openTopicId > 0) {
+            openTopic(openTopicId)
+            onTopicOpened()
+        }
+    }
+
+    /**
+     * Sets a 开奖提醒 for a topic, from the draw time its page printed.
+     *
+     * The alarm is armed here and the record stored, in that order, so a refused
+     * alarm does not leave a reminder in the list that will never fire.
+     */
+    fun setDrawReminder(topicId: Int, title: String, drawAt: Long) {
+        val now = System.currentTimeMillis()
+        if (!Reminders.drawWorthScheduling(drawAt, now)) {
+            topic.showNotice("这个开奖时间没法提醒：已经过了，或者太远")
+            return
+        }
+        val reminder = Reminder(
+            id = Reminders.drawId(topicId),
+            kind = Reminder.Kind.DRAW,
+            at = drawAt,
+            label = title,
+            topicId = topicId
+        )
+        Alarms.schedule(context, reminder, now)
+        store.putReminder(reminder)
+        topic.showNotice(
+            "已设提醒：" + Reminders.whenText(drawAt, now) +
+                if (Alarms.canNotify(context)) "" else "（系统通知是关着的，去打开才能收到）"
+        )
     }
 
     BackHandler(enabled = stack.isNotEmpty()) { pop() }
@@ -374,7 +446,7 @@ fun Shell(store: UserStore) {
                                         MineEntry.REPLIES -> push(
                                             Route.User(me.id, "我的回帖", ProfileTab.REPLIES)
                                         )
-                                        MineEntry.POINTS -> push(Route.User(me.id, "我的积分"))
+                                        MineEntry.POINTS -> push(Route.Points)
                                         MineEntry.TITLES -> push(Route.Gacha)
                                         MineEntry.MESSAGES -> push(Route.Messages)
                                         // 收藏 is the site's own list, the one
@@ -413,19 +485,22 @@ fun Shell(store: UserStore) {
                                     topicId = route.id,
                                     vm = topic,
                                     signedIn = session.signedIn,
+                                    store = store,
                                     onTopic = ::openTopic,
                                     onUser = ::openUser,
                                     onForum = { push(Route.Forum(it)) },
                                     onBack = ::pop,
                                     onLogin = { push(Route.Login()) },
                                     onRegister = { push(Route.Login(register = true)) },
-                                    onOpenLink = ::openLink
+                                    onOpenLink = ::openLink,
+                                    onSetDrawReminder = ::setDrawReminder
                                 )
                             }
 
                             is Route.Forum -> ForumScreen(
                                 forumId = route.id,
                                 vm = forum,
+                                store = store,
                                 onTopic = ::openTopic,
                                 onUser = ::openUser,
                                 onBack = ::pop,
@@ -439,6 +514,7 @@ fun Shell(store: UserStore) {
                                 vm = profile,
                                 titleOverride = route.title,
                                 startTab = route.tab,
+                                store = store,
                                 onBack = ::pop,
                                 onTopic = ::openTopic,
                                 onLogin = { push(Route.Login()) },
@@ -464,9 +540,20 @@ fun Shell(store: UserStore) {
                             Route.Notifications -> NotificationsScreen(
                                 vm = notify,
                                 signedIn = session.signedIn,
+                                userId = session.me?.id ?: 0,
                                 onBack = ::pop,
                                 onLogin = { push(Route.Login()) },
                                 onOpenHref = ::openLink
+                            )
+
+                            Route.Points -> PointsScreen(
+                                vm = points,
+                                signedIn = session.signedIn,
+                                userId = session.me?.id ?: 0,
+                                balance = session.me?.points.orEmpty(),
+                                onBack = ::pop,
+                                onLogin = { push(Route.Login()) },
+                                onTopic = ::openTopic
                             )
 
                             Route.Messages -> MessagesScreen(
@@ -512,6 +599,29 @@ fun Shell(store: UserStore) {
                                 onTopic = ::openTopic
                             )
 
+                            Route.Watch -> WatchScreen(
+                                vm = watch,
+                                store = store,
+                                onBack = ::pop,
+                                onTopic = ::openTopic
+                            )
+
+                            Route.Reminders -> RemindersScreen(
+                                store = store,
+                                onBack = ::pop,
+                                onTopic = ::openTopic
+                            )
+
+                            Route.Blocks -> BlockScreen(
+                                store = store,
+                                onBack = ::pop,
+                                // The site's own keyword filter, which this one
+                                // neither replaces nor touches.
+                                onOpenSiteFilter = {
+                                    openSitePage("站点屏蔽设置", "${Site.BASE}/home_keyword_filter_settings")
+                                }
+                            )
+
                             Route.Settings -> SettingsScreen(
                                 vm = settings,
                                 signedIn = session.signedIn,
@@ -531,7 +641,10 @@ fun Shell(store: UserStore) {
                                 store = store,
                                 vm = update,
                                 onBack = ::pop,
-                                onHistory = { push(Route.History) }
+                                onHistory = { push(Route.History) },
+                                onWatch = { push(Route.Watch) },
+                                onReminders = { push(Route.Reminders) },
+                                onBlocks = { push(Route.Blocks) }
                             )
 
                             is Route.Login -> AuthScreen(
@@ -583,6 +696,7 @@ private fun TabContent(
         when (tab) {
             Tab.HOME -> HomeScreen(
                 vm = home,
+                store = store,
                 onTopic = onTopic,
                 onForum = onForum,
                 onAllForums = onAllForums,
@@ -593,12 +707,14 @@ private fun TabContent(
 
             Tab.FORUMS -> ForumListScreen(
                 vm = forumList,
+                store = store,
                 onForum = onForum,
                 onLogin = onLogin
             )
 
             Tab.DISCOVER -> ExploreScreen(
                 vm = explore,
+                store = store,
                 onTopic = onTopic,
                 onUser = onUser,
                 onEntry = onDiscoverEntry,

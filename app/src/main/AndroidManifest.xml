@@ -20,6 +20,22 @@
     -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!--
+      本机提醒 (开奖 / 签到). These are a clock on this device, not a push channel:
+      the app has no server, so nothing can reach the phone except an alarm this
+      app set itself. When one fires it posts a local notification and stops -
+      it does not connect to linux.sb, and nothing runs in between.
+
+      POST_NOTIFICATIONS is asked for at the moment a reminder is first set, not
+      at launch. RECEIVE_BOOT_COMPLETED is needed because a reboot clears alarms
+      and they have to be armed again from the stored list. SCHEDULE_EXACT_ALARM
+      is declared so a draw time can be hit to the minute; without the grant the
+      app falls back to an inexact alarm rather than failing.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -45,8 +61,21 @@
         </activity>
 
         <!--
-          Only path shared out of the app: the downloaded build, from the app's
-          own cache. See res/xml/file_paths.xml.
+          本机提醒. Fires the local notification, and re-arms the stored alarms
+          after a reboot. Not exported: only this app's own alarms and the system's
+          boot broadcast reach it.
+        -->
+        <receiver
+            android:name=".notify.ReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Two paths shared out of the app, both from its own cache: the downloaded
+          build, and a 分享成图 card. See res/xml/file_paths.xml.
         -->
         <provider
             android:name="androidx.core.content.FileProvider"

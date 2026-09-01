@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -28,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -41,10 +43,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.ForumRef
 import StarBase.Android.Forum.data.HomePage
 import StarBase.Android.Forum.data.SiteStats
 import StarBase.Android.Forum.data.TopicCard
+import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.ui.EmptyPanel
 import StarBase.Android.Forum.ui.ErrorPanel
@@ -58,6 +62,8 @@ import StarBase.Android.Forum.ui.OnReturnToForeground
 import StarBase.Android.Forum.ui.Refreshable
 import StarBase.Android.Forum.ui.failureOf
 import StarBase.Android.Forum.ui.freshnessText
+import StarBase.Android.Forum.ui.components.BlockedNote
+import StarBase.Android.Forum.ui.components.BlockedRow
 import StarBase.Android.Forum.ui.components.PageHead
 import StarBase.Android.Forum.ui.components.SectionHeader
 import StarBase.Android.Forum.ui.components.SegmentPill
@@ -204,6 +210,8 @@ class HomeViewModel : ViewModel() {
 @Composable
 fun HomeScreen(
     vm: HomeViewModel,
+    /** 本地屏蔽 rules. The feed is filtered as it is drawn; nothing is re-fetched. */
+    store: UserStore,
     onTopic: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onAllForums: () -> Unit,
@@ -231,6 +239,7 @@ fun HomeScreen(
             HomeContent(
                 vm = vm,
                 home = s.value,
+                store = store,
                 onTopic = onTopic,
                 onForum = onForum,
                 onAllForums = onAllForums,
@@ -245,6 +254,7 @@ fun HomeScreen(
 private fun HomeContent(
     vm: HomeViewModel,
     home: HomePage,
+    store: UserStore,
     onTopic: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onAllForums: () -> Unit,
@@ -252,6 +262,9 @@ private fun HomeContent(
     onNewTopic: () -> Unit
 ) {
     val listState = rememberLazyListState()
+    // Whether the 屏蔽 rows are showing. Per-screen and not stored: revealing is a
+    // glance at what a rule caught, not a setting.
+    var revealBlocked by remember { mutableStateOf(false) }
 
     // Infinite scroll: pull the next page once the tail is in view.
     LaunchedEffect(listState, vm.rows.size) {
@@ -317,8 +330,11 @@ private fun HomeContent(
                 if (vm.refreshing) LoadingMark("正在切换") else EmptyPanel("这里还没有内容")
             }
         } else {
+            // Applied to the rows on their way to the screen, not to what was
+            // fetched: a rule turned off puts everything back with no request.
+            val filtered = Filters.topics(store.blockRules, vm.rows)
             itemsIndexed(
-                items = vm.rows,
+                items = filtered.visible,
                 key = { _, topic -> topic.id }
             ) { index, topic ->
                 if (index > 0) Hairline(startInset = 66)
@@ -327,6 +343,21 @@ private fun HomeContent(
                     onClick = { onTopic(topic.id) },
                     onAuthorClick = { onUser(topic.authorId) }
                 )
+            }
+            if (filtered.hiddenCount > 0) {
+                item("blocked") {
+                    Hairline(startInset = 66)
+                    BlockedNote(
+                        count = filtered.hiddenCount,
+                        revealed = revealBlocked,
+                        onToggle = { revealBlocked = !revealBlocked }
+                    )
+                }
+                if (revealBlocked) {
+                    items(filtered.hidden, key = { "blocked-" + it.item.id }) { blocked ->
+                        BlockedRow(blocked) { onTopic(blocked.item.id) }
+                    }
+                }
             }
             item("footer") {
                 ListFooter(

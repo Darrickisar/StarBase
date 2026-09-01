@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,9 +34,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Board
+import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.BoardTab
 import StarBase.Android.Forum.data.RankRowData
 import StarBase.Android.Forum.data.TopicCard
+import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Site
 import StarBase.Android.Forum.ui.EmptyPanel
@@ -47,6 +51,8 @@ import StarBase.Android.Forum.ui.LoadingMark
 import StarBase.Android.Forum.ui.OnReturnToForeground
 import StarBase.Android.Forum.ui.Refreshable
 import StarBase.Android.Forum.ui.ageLabel
+import StarBase.Android.Forum.ui.components.BlockedNote
+import StarBase.Android.Forum.ui.components.BlockedRow
 import StarBase.Android.Forum.ui.components.LightAction
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.PageHead
@@ -147,25 +153,30 @@ class ExploreViewModel : ViewModel() {
 @Composable
 fun ExploreScreen(
     vm: ExploreViewModel,
+    /** 本地屏蔽 rules, applied to the search results. */
+    store: UserStore,
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onEntry: (DiscoverEntry) -> Unit,
     onLogin: () -> Unit
 ) {
     Refreshable(refreshing = vm.refreshing, onRefresh = vm::refreshVisible) {
-        ExploreList(vm, onTopic, onUser, onEntry, onLogin)
+        ExploreList(vm, store, onTopic, onUser, onEntry, onLogin)
     }
 }
 
 @Composable
 private fun ExploreList(
     vm: ExploreViewModel,
+    store: UserStore,
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onEntry: (DiscoverEntry) -> Unit,
     onLogin: () -> Unit
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
+    // Cleared with the query: the hidden rows belong to one set of results.
+    var revealBlocked by remember(vm.query) { mutableStateOf(false) }
     val submit: () -> Unit = {
         keyboard?.hide()
         vm.search()
@@ -204,13 +215,31 @@ private fun ExploreList(
                 is Load.Ready -> if (results.value.isEmpty()) {
                     item("results-empty") { EmptyPanel("没有找到相关帖子", "换个关键词试试") }
                 } else {
-                    itemsIndexed(results.value, key = { _, t -> t.id }) { index, topic ->
+                    // Searching for a blocked word is the one case where hiding the
+                    // hit outright would be absurd, so the note sits right there.
+                    val filtered = Filters.topics(store.blockRules, results.value)
+                    itemsIndexed(filtered.visible, key = { _, t -> t.id }) { index, topic ->
                         if (index > 0) Hairline(startInset = 66)
                         TopicRow(
                             topic = topic,
                             onClick = { onTopic(topic.id) },
                             onAuthorClick = { onUser(topic.authorId) }
                         )
+                    }
+                    if (filtered.hiddenCount > 0) {
+                        item("blocked") {
+                            Hairline(startInset = 66)
+                            BlockedNote(
+                                count = filtered.hiddenCount,
+                                revealed = revealBlocked,
+                                onToggle = { revealBlocked = !revealBlocked }
+                            )
+                        }
+                        if (revealBlocked) {
+                            items(filtered.hidden, key = { "blocked-" + it.item.id }) { blocked ->
+                                BlockedRow(blocked) { onTopic(blocked.item.id) }
+                            }
+                        }
                     }
                 }
             }

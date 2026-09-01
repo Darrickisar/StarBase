@@ -23,6 +23,9 @@ import StarBase.Android.Forum.data.LiveBlock
 import StarBase.Android.Forum.data.Me
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.OAuthBinding
+import StarBase.Android.Forum.data.PointsEntry
+import StarBase.Android.Forum.data.PointsPage
+import StarBase.Android.Forum.data.PointsRule
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.RankRowData
@@ -1222,18 +1225,135 @@ object Parse {
     private fun queryValue(href: String, name: String): String =
         Regex("[?&]${Regex.escape(name)}=([^&#]*)").find(href)?.groupValues?.get(1).orEmpty()
 
+    /**
+     * 通知, off `/user/{id}?tab=notifications`.
+     *
+     * Not `/notify`. That address answers 200 with a page whose body is
+     * 「用户不存在」 and no rows at all, so the old reader parsed a perfectly
+     * valid page into an empty list and the screen said 「没有新通知」 forever.
+     * The site's own 我的通知 link is the profile tab, and this reads that.
+     *
+     * A row is one `li.post-item.notification-item`: the actor on
+     * `.notification-head`, the sentence in `.notification-content`, the time in
+     * `.post-meta`, and *two* links - the actor's profile and the topic. The
+     * topic is the one worth opening, and it is the second one, which is why the
+     * old `selectFirst("a")` sent every tap to the profile instead.
+     */
     fun notifications(html: String): List<NotifyItem> {
         val doc = Jsoup.parse(html, Site.BASE)
-        return doc.select(".notify-item, .notification-item, ul.notify-list > li").map { li ->
+        val rows = doc.select("li.post-item.notification-item")
+            .ifEmpty { doc.select(".notification-item, .notify-item, ul.notify-list > li") }
+        return rows.map { li ->
+            // Tried in order, not as one comma group: the avatar's link comes
+            // first in the markup and wraps an <img>, so a combined selector
+            // matches it and reads a blank name out of it.
+            val actorLink = li.selectFirst(".notification-head a[href*=/user/]")
+                ?: li.selectFirst("a.post-title[href*=/user/]")
+                ?: li.selectFirst("a.avatar-profile-link[href*=/user/]")
+            val actor = actorLink?.text()?.trim().orEmpty()
+                // The avatar carries the name as alt text when the head has no link.
+                .ifBlank { li.selectFirst(".post-avatar img")?.attr("alt")?.trim().orEmpty() }
+            val content = li.selectFirst(".notification-content")
+            // The sentence, minus the 「查看主题」 anchor the site appends - that
+            // link is what [href] already is, and leaving its text in made every
+            // row end in a phrase that looked like part of the message.
+            val text = content?.let { block ->
+                block.clone().apply { select("a").remove() }.text().trim()
+                    .ifBlank { block.text().trim() }
+            } ?: li.text().trim()
+            // Prefer a link into the content over the avatar's profile link.
+            val topicLink = content?.selectFirst("a[href*=/topic/]")
+                ?: li.selectFirst("a[href*=/topic/]")
             NotifyItem(
-                text = li.text().trim(),
-                timeText = li.textOf(".notify-time, .time, [data-performance-time]"),
-                href = li.selectFirst("a")?.attrUrl("href").orEmpty(),
+                text = text,
+                timeText = li.textOf(".post-meta span, .post-meta, .notify-time, .time"),
+                href = (topicLink ?: actorLink)?.attrUrl("href").orEmpty(),
                 unread = li.hasClass("unread") || li.selectFirst(".unread") != null,
-                actor = li.selectFirst("a[href*=/user/]")?.text()?.trim().orEmpty(),
-                avatar = li.selectFirst("img")?.attrUrl("src").orEmpty()
+                actor = actor,
+                actorId = idFrom(actorLink?.attr("href").orEmpty(), "user"),
+                avatar = li.selectFirst("img")?.attrUrl("src").orEmpty(),
+                kind = li.textOf(".notification-kind")
             )
         }.filter { it.text.isNotBlank() }
+    }
+
+    /**
+     * 我的积分记录, off `/user/{id}?tab=points_rewards`.
+     *
+     * The site keeps a real ledger - every change, with its reason, its topic and
+     * a signed amount - and 我的 used to point 积分 at the profile's *topics*
+     * tab, so the entry showed your posts under a points heading.
+     *
+     * The sign is read from the printed amount rather than from the row's
+     * positive/negative class: the number is what the site shows the reader, and
+     * a class name is the easier of the two for the site to rename.
+     */
+    fun pointsLedger(html: String): PointsPage {
+        val doc = Jsoup.parse(html, Site.BASE)
+        val entries = doc.select("li.points-rewards-detail, li.post-item.points-rewards-detail")
+            .map { li ->
+                val topic = li.selectFirst("a.points-rewards-topic")
+                val amount = li.textOf(".points-rewards-change-value b")
+                    .ifBlank { li.textOf(".points-rewards-change-value") }
+                val time = li.selectFirst(".points-rewards-time")
+                PointsEntry(
+                    reason = li.textOf(".points-rewards-reason"),
+                    delta = signedInt(amount).let {
+                        // A row classed negative whose number lost its sign still
+                        // counts down; the class is the fallback, not the source.
+                        if (it > 0 && li.hasClass("negative")) -it else it
+                    },
+                    timeText = time?.text()?.trim().orEmpty(),
+                    at = time?.attr("datetime").orEmpty(),
+                    topicId = idFrom(topic?.attr("href").orEmpty(), "topic"),
+                    topicTitle = topic?.let { it.attr("title").ifBlank { it.text() } }?.trim().orEmpty()
+                )
+            }
+            .filter { it.reason.isNotBlank() || it.delta != 0 }
+
+        val rules = doc.select(".points-rewards-rule-card").mapNotNull { card ->
+            val value = card.selectFirst(".points-rewards-rule-value")
+            val action = card.textOf("span")
+            if (action.isBlank() && value == null) return@mapNotNull null
+            PointsRule(
+                action = action,
+                value = value?.text()?.trim().orEmpty(),
+                disabled = value?.hasClass("disabled") == true
+            )
+        }
+
+        return PointsPage(
+            entries = entries,
+            rules = rules,
+            page = currentPage(doc),
+            lastPage = lastPage(doc),
+            ruleNote = doc.textOf(".points-rewards-rules-head p")
+        )
+    }
+
+    /** `+33` / `-90` as a signed number. 0 when there is no number in it. */
+    private fun signedInt(text: String): Int {
+        val m = Regex("""([+-]?)\s*(\d[\d,]*)""").find(text) ?: return 0
+        val n = m.groupValues[2].replace(",", "").toIntOrNull() ?: return 0
+        return if (m.groupValues[1] == "-") -n else n
+    }
+
+    /** Which page of a `.pagination` list is marked active. 1 when none is. */
+    private fun currentPage(doc: Document): Int =
+        firstInt(doc.textOf(".pagination li.active a, .pagination li.active")).coerceAtLeast(1)
+
+    /**
+     * The highest page a `.pagination` list links to.
+     *
+     * Read as the largest `p=` across every link rather than "the one before
+     * 下一页", because the last page has no 下一页 at all and that reading would
+     * report one page too few there.
+     */
+    private fun lastPage(doc: Document): Int {
+        val pages = doc.select(".pagination a[href]").mapNotNull { a ->
+            queryValue(a.attr("href"), "p").toIntOrNull()
+        }
+        return maxOf(pages.maxOrNull() ?: 1, currentPage(doc))
     }
 
     /**

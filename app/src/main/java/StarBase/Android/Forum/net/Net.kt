@@ -15,7 +15,19 @@ object Site {
 
     const val LOGIN = "$BASE/login"
     const val REGISTER = "$BASE/register"
+
+    /**
+     * Unread counters, as JSON. This is the badge endpoint only.
+     *
+     * Fetched as a *page* it answers 200 with a body reading 「用户不存在」 and no
+     * notification rows, which is why the 通知 screen was empty: the list lives on
+     * the profile tab ([userTab]), not here.
+     */
     const val NOTIFY = "$BASE/notify"
+
+    /** The site's own live badge poll. Answers `{"ok":1,"unread":N}`. */
+    const val NOTIFY_BADGE = "$BASE/notification_live_badge_status"
+
     const val MESSAGES = "$BASE/direct_messages"
     const val GACHA = "$BASE/gacha"
     const val SEARCH = "$BASE/search"
@@ -50,6 +62,18 @@ object Site {
         if (page > 1) "$BASE/topic/$id?p=$page" else "$BASE/topic/$id"
 
     fun user(id: Int) = "$BASE/user/$id"
+
+    /**
+     * One tab of a profile page, optionally paged.
+     *
+     * The site hangs 我的通知 and 我的积分 off here as `?tab=`, exactly like 主题 /
+     * 回帖 / 收藏 - there is no separate address for either.
+     */
+    fun userTab(id: Int, tab: String, page: Int = 1) = buildString {
+        append("$BASE/user/$id")
+        if (tab.isNotBlank()) append("?tab=").append(tab)
+        if (page > 1) append(if (tab.isNotBlank()) "&" else "?").append("p=").append(page)
+    }
 
     fun loginWithRedirect(path: String) =
         "$LOGIN?redirect=" + java.net.URLEncoder.encode(path, "UTF-8")

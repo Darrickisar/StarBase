@@ -20,6 +20,7 @@ import StarBase.Android.Forum.data.GachaResult
 import StarBase.Android.Forum.data.HomePage
 import StarBase.Android.Forum.data.NotifyItem
 import StarBase.Android.Forum.data.NotifyState
+import StarBase.Android.Forum.data.PointsPage
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
@@ -253,29 +254,65 @@ object Api {
     }
 
     /**
-     * Unread counters. `/notify` answers JSON and, for a guest, redirects to
-     * /login - which we report as "not signed in" rather than an error.
+     * The unread notification count, from the endpoint the site's own badge polls.
+     *
+     * This used to ask `/notify`, which answers `{"ok":0,"message":"用户不存在"}` -
+     * valid JSON with no counter in it and no `redirect`, so the old reader took
+     * it for a signed-in reply and published a count of 0. The badge was
+     * therefore always empty, whatever was waiting.
+     *
+     * `{"ok":1,"unread":N}` is the whole contract. `ok:0` means the session is
+     * not usable, which is reported as signed out rather than as zero unread.
+     *
+     * The site publishes no equivalent counter for 私信 - its own sidebar link to
+     * `/direct_messages` carries no badge - so [NotifyState.messages] is left at
+     * 0 here rather than invented.
      */
     suspend fun notifyState(): NotifyState = io {
-        val body = Net.getText(Site.NOTIFY, ajax = true).trim()
+        val body = Net.getText(Site.NOTIFY_BADGE, ajax = true).trim()
         if (!body.startsWith("{")) return@io NotifyState(signedIn = false)
         val json = try {
             JSONObject(body)
         } catch (e: Exception) {
             return@io NotifyState(signedIn = false)
         }
-        if (json.optString("redirect").contains("login")) {
+        val ok = json.optBoolean("ok", json.optInt("ok", 0) == 1)
+        if (!ok || json.optString("redirect").contains("login")) {
             return@io NotifyState(signedIn = false)
         }
         NotifyState(
-            notifications = json.optInt("count", json.optInt("notifications", 0)),
-            messages = json.optInt("messages", json.optInt("dm", 0)),
+            notifications = json.optInt("unread", json.optInt("count", 0)),
             signedIn = true
         )
     }
 
-    suspend fun notifications(): List<NotifyItem> = io {
-        Parse.notifications(Net.getText(Site.NOTIFY))
+    /**
+     * 通知, read off the signed-in user's own profile tab.
+     *
+     * [userId] is required because that is where the site keeps the list - there
+     * is no self-addressed 「my notifications」 route. A guest, or a stale session,
+     * gets the login page here, and that is an AUTH failure rather than an empty
+     * list: 「没有新通知」 for someone who has been signed out is a lie.
+     */
+    suspend fun notifications(userId: Int): List<NotifyItem> = io {
+        require(userId > 0) { "notifications needs a user id" }
+        val html = Net.getText(Site.userTab(userId, ProfileTab.NOTIFICATIONS))
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("登录状态已失效，请重新登录", SiteException.Kind.AUTH)
+        }
+        Parse.notifications(html)
+    }
+
+    /** 我的积分记录. Same shape as [notifications]: a tab on your own profile. */
+    suspend fun points(userId: Int, page: Int = 1): PointsPage = io {
+        require(userId > 0) { "points needs a user id" }
+        val html = Net.getText(Site.userTab(userId, ProfileTab.POINTS, page))
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("登录状态已失效，请重新登录", SiteException.Kind.AUTH)
+        }
+        Parse.pointsLedger(html)
     }
 
     suspend fun conversations(): List<Conversation> = io {

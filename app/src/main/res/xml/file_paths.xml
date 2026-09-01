@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The only thing this app shares out is a downloaded build, from its own cache.
-  Nothing else is exposed.
+  Two directories, both inside the app's own cache, both things on their way out:
+
+  - apk/   a downloaded build, handed to the platform installer.
+  - share/ a 分享成图 card, handed to the share chooser.
+
+  Nothing else is exposed, and neither directory is a store: the updater deletes
+  its download after handing it over, and share/ is swept on every new card.
 -->
 <paths>
     <cache-path name="apk" path="apk/" />
+    <cache-path name="share" path="share/" />
 </paths>
