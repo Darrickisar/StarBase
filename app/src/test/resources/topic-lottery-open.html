@@ -1,0 +1,56 @@
+<!doctype html>
+<!--
+  A guest view of an open 抽奖帖, hand-built from the markup linux.sb's own
+  lottery renderer emits: a `section.community-lottery-card.is-open` as the LAST
+  child of the opening post's `.post-content`, after the body. Its condition line
+  is the timed kind - 「到 <日期> <时刻>自动开奖」 - which is the only kind that can
+  carry a 开奖提醒.
+
+  This post is deliberately SHORT, so `.post-content` has no
+  `[data-long-content-fold]` wrapper. That is the case the app used to get wrong:
+  with no fold to hide behind, the panel was walked as body text and the post read
+  「抽奖帖 抽奖中 410 人参与 …」. Nothing here is copied from a live page.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>周年庆抽奖 - LINUX SB</title></head>
+<body>
+<div class="wrap">
+  <h1 class="post-topic-title">周年庆抽奖</h1>
+  <div class="breadcrumb"><a href="/forum/5">活动</a></div>
+  <ul class="post-list topic-post-list">
+
+    <li class="post-item post-entry" id="post-1">
+      <div class="post-avatar"><a href="/user/1"><img class="avatar-img" src="/app/avatars/a1.svg" alt="站长"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/1">站长</a>
+          <span class="post-user-group user-uid-badge"><span class="user-uid-badge-group-name">建设者</span><span class="user-uid-badge-uid">UID 1</span></span>
+          <div class="post-meta"><span class="post-time">2026-09-01</span></div>
+        </div></div>
+        <div class="post-content">
+          <p>周年庆，抽三份小礼物，回帖即参与。</p>
+          <section class="community-lottery-card is-open" data-lottery-card="1">
+            <header>
+              <div>
+                <b>抽奖帖</b>
+                <span>回复满 5 字即参与，需完成人机验证</span>
+              </div>
+              <div class="community-lottery-card-side">
+                <strong class="community-lottery-status-pill">抽奖中</strong>
+                <em>410 人参与</em>
+              </div>
+            </header>
+            <ul class="community-lottery-prizes">
+              <li><strong>一等奖 烧饼周边</strong><span>实物 · 1 份 · 每份 1 个</span></li>
+              <li><strong>二等奖 兑换码</strong><span>兑换码 · 5 份 · 每份 1 个烧饼</span></li>
+            </ul>
+            <div class="community-lottery-condition">到 2026-09-04 09:12自动开奖</div>
+          </section>
+        </div>
+      </div>
+    </li>
+
+  </ul>
+</div>
+</body>
+</html>

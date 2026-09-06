@@ -1,6 +1,7 @@
 package StarBase.Android.Forum
 
 import org.jsoup.Jsoup
+import java.util.Calendar
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -187,6 +188,120 @@ class ParseTest {
         // /topic/1 is a single page; the fixture's own links are the only source.
         val t = Parse.topic(1, 1, fixture("topic1.html"))
         assertTrue("last page must be at least 1", t.lastPage >= 1)
+    }
+
+    // ---- 抽奖卡 ---------------------------------------------------------------
+
+    /**
+     * 开奖时间 is a field the site prints, not a sentence in the post.
+     *
+     * The app used to hunt for 「开奖时间：…」 in the body, which a site-made lottery
+     * never writes - so the time never appeared and 开奖提醒 was unreachable. These
+     * pin the panel the site actually renders.
+     */
+    @Test
+    fun openLotteryCardCarriesItsPrizesAndDrawTime() {
+        val t = Parse.topic(21, 1, fixture("topic-lottery-open.html"))
+        val lot = assertNotNull("expected a lottery card", t.lottery).let { t.lottery!! }
+
+        assertEquals("抽奖中", lot.status)
+        assertTrue("is-open means it is still taking part", lot.open)
+        assertEquals("回复满 5 字即参与，需完成人机验证", lot.note)
+        assertEquals("410 人参与", lot.participants)
+        assertEquals("到 2026-09-04 09:12自动开奖", lot.condition)
+        assertEquals("", lot.result)
+        assertTrue("an open draw has no winners yet", lot.winners.isEmpty())
+
+        assertEquals(2, lot.prizes.size)
+        assertEquals("一等奖 烧饼周边", lot.prizes[0].name)
+        assertEquals("实物 · 1 份 · 每份 1 个", lot.prizes[0].detail)
+        assertEquals("二等奖 兑换码", lot.prizes[1].name)
+        assertEquals("兑换码 · 5 份 · 每份 1 个烧饼", lot.prizes[1].detail)
+
+        // Read back as wall-clock parts rather than compared against the same
+        // helper the parser used: the point is that 2026-09-04 09:12 survived.
+        assertTrue("timed draw must carry a moment", lot.drawAt > 0L)
+        val cal = Calendar.getInstance().apply { timeInMillis = lot.drawAt }
+        assertEquals(2026, cal.get(Calendar.YEAR))
+        assertEquals(9, cal.get(Calendar.MONTH) + 1)
+        assertEquals(4, cal.get(Calendar.DAY_OF_MONTH))
+        assertEquals(9, cal.get(Calendar.HOUR_OF_DAY))
+        assertEquals(12, cal.get(Calendar.MINUTE))
+    }
+
+    /**
+     * The panel is not body text. On a short post there is no fold wrapper to hide
+     * it, and walking it as body is what made a lottery post read
+     * 「抽奖帖 抽奖中 410 人参与 …」.
+     */
+    @Test
+    fun lotteryCardDoesNotLeakIntoTheOpeningBody() {
+        val t = Parse.topic(21, 1, fixture("topic-lottery-open.html"))
+        val opening = assertNotNull("expected an opening post", t.opening).let { t.opening!! }
+
+        assertEquals(
+            listOf("周年庆，抽三份小礼物，回帖即参与。"),
+            opening.blocks.map { it.text }
+        )
+        assertFalse(
+            "panel text must not appear in the post body",
+            opening.plainText.contains("人参与") || opening.plainText.contains("抽奖帖")
+        )
+    }
+
+    /**
+     * 满 N 人自动开奖 carries no clock, so [Lottery.drawAt] stays 0 - which is how
+     * the screen knows to print the condition and offer no 开奖提醒. Nobody knows
+     * when the 500th reply lands, and a guessed alarm is worse than none.
+     */
+    @Test
+    fun countTriggeredLotteryHasNoDrawTime() {
+        val t = Parse.topic(22, 1, fixture("topic-lottery-drawn.html"))
+        val lot = assertNotNull("expected a lottery card", t.lottery).let { t.lottery!! }
+
+        assertEquals("满 500 人自动开奖", lot.condition)
+        assertEquals("a count-triggered draw has no moment to ring at", 0L, lot.drawAt)
+    }
+
+    @Test
+    fun drawnLotteryCardCarriesResultAndWinners() {
+        val t = Parse.topic(22, 1, fixture("topic-lottery-drawn.html"))
+        val lot = assertNotNull("expected a lottery card", t.lottery).let { t.lottery!! }
+
+        assertEquals("已开奖", lot.status)
+        assertFalse("a drawn lottery is not open", lot.open)
+        assertEquals("本次抽奖已经完成", lot.note)
+        assertEquals("512 人参与", lot.participants)
+        assertEquals("实际中奖 3 人", lot.result)
+
+        assertEquals(3, lot.winners.size)
+        assertEquals(listOf(11, 12, 13), lot.winners.map { it.userId })
+        assertEquals(listOf("甲", "乙", "丙"), lot.winners.map { it.name })
+        assertEquals("兑换码", lot.winners[0].prize)
+    }
+
+    /**
+     * The card sits *outside* `[data-long-content-fold]`, as a sibling after it -
+     * the second reason the time never showed: the body parser reads the fold as
+     * its root, so on a long lottery post the panel was dropped entirely.
+     */
+    @Test
+    fun lotteryCardIsFoundOutsideTheLongContentFold() {
+        val t = Parse.topic(22, 1, fixture("topic-lottery-drawn.html"))
+        val opening = assertNotNull("expected an opening post", t.opening).let { t.opening!! }
+
+        assertNotNull("the card is outside the fold and must still be read", t.lottery)
+        assertEquals(
+            listOf(
+                "攒了三份兑换码，满 500 人就开。",
+                "规则照旧：回帖满五个字，重复回帖只算一次。"
+            ),
+            opening.blocks.map { it.text }
+        )
+        assertFalse(
+            "the winners list is not body text",
+            opening.plainText.contains("中奖名单")
+        )
     }
 
     // ---- comment threading ---------------------------------------------------
@@ -826,17 +941,129 @@ class ParseTest {
     // ---- login ---------------------------------------------------------------
 
     @Test
-    fun loginPageExposesCsrfAndProvesAutomationIsBlocked() {
+    fun loginPageExposesCsrfAndTheThingsASubmitHasToCarry() {
         val html = fixture("login.html")
         val doc = org.jsoup.Jsoup.parse(html, "https://linux.sb")
 
         assertEquals(64, Parse.csrfOf(doc).length)
 
-        // These are why login runs in a WebView instead of being automated:
-        // a signed captcha token and a proof-of-work challenge.
+        // The three guards a native submit has to satisfy: a signed captcha token,
+        // a proof-of-work challenge, and the honeypot that must go back empty.
         assertNotNull(doc.selectFirst("input[name=native_captcha_token]"))
         assertNotNull(doc.selectFirst("input[name=native_captcha_pow]"))
+        assertNotNull(doc.selectFirst("input[name=native_captcha_company]"))
         assertEquals("1", doc.selectFirst("[data-pow-required]")?.attr("data-pow-required"))
+    }
+
+    /**
+     * [Parse.loginForm] is what replaced driving a WebView, so every field it
+     * misreads is a submit the site rejects for a reason the screen cannot show.
+     */
+    @Test
+    fun loginFormReadsEverythingASubmitNeeds() {
+        val form = Parse.loginForm(fixture("login.html"))
+        assertNotNull("login.html should parse as a login form", form)
+        form!!
+
+        assertEquals(64, form.csrf.length)
+        assertEquals("15 + 2 = ?", form.question)
+        assertTrue("token should come off the page", form.token.isNotBlank())
+        assertEquals("0000000000000000", form.powPrefix)
+        assertEquals(3, form.powZeros)
+        assertTrue(form.powRequired)
+        // Absolute, because it is fetched rather than clicked.
+        assertEquals(
+            "https://linux.sb/user_review_email_code?native_captcha=1",
+            form.refreshUrl
+        )
+        // The names the form actually posts. A field appearing or disappearing here
+        // is the site changing its form, which is worth failing over.
+        assertEquals(
+            listOf(
+                "_csrf", "username", "password", "native_captcha_answer",
+                "native_captcha_token", "native_captcha_pow", "native_captcha_company"
+            ),
+            form.fields
+        )
+    }
+
+    /** A page with no password field is not a login page, however much else it has. */
+    @Test
+    fun loginFormIsNullOnPagesThatAreNotOne() {
+        assertNull(Parse.loginForm(fixture("home.html")))
+        assertNull(Parse.loginForm(fixture("topic1.html")))
+        assertNull(Parse.loginForm(fixture("search-form.html")))
+    }
+
+    /**
+     * 刷新验证码 replaces the question, the token and the work - and nothing else.
+     * The `_csrf` of the page it came from is still the one to post.
+     */
+    @Test
+    fun refreshedCaptchaReplacesTheChallengeAndKeepsTheCsrf() {
+        val before = Parse.loginForm(fixture("login.html"))!!
+        val after = Parse.refreshedCaptcha(
+            """{"ok":1,"captcha":{"question":"7 - 3 = ?","token":"NEW.TOKEN",
+               "pow":"ffff0000ffff0000","zeros":4,"pow_required":true}}""",
+            before
+        )
+        assertNotNull(after)
+        after!!
+
+        assertEquals("7 - 3 = ?", after.question)
+        assertEquals("NEW.TOKEN", after.token)
+        assertEquals("ffff0000ffff0000", after.powPrefix)
+        assertEquals(4, after.powZeros)
+        assertEquals(before.csrf, after.csrf)
+        assertEquals(before.refreshUrl, after.refreshUrl)
+    }
+
+    /** A refusal, or anything that is not the shape the button expects, is null. */
+    @Test
+    fun refreshedCaptchaRejectsWhatItCannotUse() {
+        val before = Parse.loginForm(fixture("login.html"))!!
+        assertNull(Parse.refreshedCaptcha("""{"ok":0,"message":"太频繁"}""", before))
+        assertNull(Parse.refreshedCaptcha("""{"ok":1}""", before))
+        assertNull(Parse.refreshedCaptcha("""{"ok":1,"captcha":{"question":"1+1=?"}}""", before))
+        assertNull(Parse.refreshedCaptcha("<html>not json</html>", before))
+    }
+
+    /**
+     * The site clamps zeros to 2..5 before using it, so a page asking for 9 is
+     * asking for its own default rather than for work no phone would finish.
+     */
+    @Test
+    fun powZerosStayInTheRangeTheSiteItselfUses() {
+        val html = fixture("login.html")
+        assertEquals(5, Parse.loginForm(html.replace("data-pow-zeroes=\"3\"", "data-pow-zeroes=\"9\""))!!.powZeros)
+        assertEquals(2, Parse.loginForm(html.replace("data-pow-zeroes=\"3\"", "data-pow-zeroes=\"1\""))!!.powZeros)
+        assertEquals(3, Parse.loginForm(html.replace("data-pow-zeroes=\"3\"", "data-pow-zeroes=\"\""))!!.powZeros)
+    }
+
+    /**
+     * The proof of work, checked against a hash computed here rather than against a
+     * hardcoded nonce: the requirement is the digest, and the walk has to be the
+     * page's own (`i.toString(16)` from zero) because the answer is bound to a
+     * signed token.
+     */
+    @Test
+    fun powSolverFindsTheNonceTheSiteWouldAccept() {
+        val prefix = "0000000000000000"
+        val nonce = StarBase.Android.Forum.net.Api.solvePow(prefix, 3)
+
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("$prefix:$nonce".toByteArray())
+            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+        assertTrue("digest $digest should start with 000", digest.startsWith("000"))
+
+        // The first such nonce, not merely one of them: the site counts the same way.
+        val earlier = (0 until nonce.toInt(16)).none { i ->
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest("$prefix:${i.toString(16)}".toByteArray())
+                .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+                .startsWith("000")
+        }
+        assertTrue("solvePow should return the first matching nonce", earlier)
     }
 
     // ---- 登录页识别 -------------------------------------------------------
@@ -1477,5 +1704,123 @@ class ParseTest {
         assertFalse(mark("""<button class="fav-btn"><span>收藏</span></button>""")!!.on)
         // The label is the site's, whatever it says.
         assertEquals("取消收藏", mark("""<button class="fav-btn"><span>取消收藏</span></button>""")!!.label)
+    }
+
+    // ---- 通知 -----------------------------------------------------------------
+
+    /**
+     * 通知 lives on `/user/{id}?tab=notifications`, and the row's *second* link is
+     * the one worth opening.
+     *
+     * Both halves of this were the bug. The app fetched `/notify`, which answers
+     * 200 with 「用户不存在」 and no rows, so the screen said 「没有新通知」 no matter
+     * what was waiting; and the parser took `selectFirst("a")`, which is the
+     * avatar's profile link, so a tap would have gone to the sender rather than
+     * the topic.
+     */
+    @Test
+    fun notificationsReadRowsOffTheProfileTab() {
+        val items = Parse.notifications(fixture("notifications-tab.html"))
+
+        assertEquals(3, items.size)
+
+        val first = items[0]
+        assertEquals("甲用户", first.actor)
+        assertEquals(2001, first.actorId)
+        assertEquals("通知", first.kind)
+        assertEquals("3小时前", first.timeText)
+        // The topic, not the actor's profile.
+        assertEquals("https://linux.sb/topic/18225", first.href)
+        // The sentence keeps its own words and drops the 「查看主题」 anchor text.
+        assertEquals("用户「甲用户」打赏了你的主题，积分+33", first.text)
+        assertFalse(first.text.contains("查看主题"))
+
+        assertEquals("提及", items[1].kind)
+        assertEquals("https://linux.sb/topic/18587#post-42", items[1].href)
+
+        // A row with no topic link at all still parses, and keeps the actor link
+        // rather than reporting a blank destination.
+        assertEquals("用户「丙用户」回复了你的主题", items[2].text)
+        assertEquals("https://linux.sb/user/2003", items[2].href)
+    }
+
+    /**
+     * What `/notify` actually answers. Pinned because it is *not* an error page -
+     * it parses fine and yields nothing, which is exactly why the empty 通知
+     * screen looked like "you have no notifications" for so long.
+     */
+    @Test
+    fun theOldNotifyPageYieldsNothing() {
+        val page = """<!doctype html><html><body><div class="mainpanel">
+            <h1>消息</h1><p>用户不存在</p></div></body></html>"""
+        assertTrue(Parse.notifications(page).isEmpty())
+    }
+
+    // ---- 我的积分记录 ---------------------------------------------------------
+
+    /**
+     * The ledger, off `?tab=points_rewards`. 我的 used to point 积分 at the profile's
+     * *topics* tab, so the entry showed posts instead of points.
+     */
+    @Test
+    fun pointsLedgerReadsSignedEntriesAndRules() {
+        val page = Parse.pointsLedger(fixture("points-rewards-tab.html"))
+
+        assertEquals(3, page.entries.size)
+
+        val donate = page.entries[0]
+        assertEquals("用户「甲用户」打赏了你的主题", donate.reason)
+        assertEquals(33, donate.delta)
+        assertEquals(18225, donate.topicId)
+        assertEquals("示例主题标题", donate.topicTitle)
+        assertEquals("2026-09-01 10:28", donate.timeText)
+        assertEquals("2026-09-01T10:28:38+08:00", donate.at)
+
+        // A row with no topic - 签到 - is not skipped, it just has no link.
+        assertEquals("每日签到", page.entries[1].reason)
+        assertEquals(5, page.entries[1].delta)
+        assertEquals(0, page.entries[1].topicId)
+
+        // Spending is negative, read from the printed sign.
+        assertEquals(-90, page.entries[2].delta)
+        assertEquals("十连抽:称号系统", page.entries[2].reason)
+
+        assertEquals(1, page.page)
+        assertEquals(2, page.lastPage)
+
+        assertEquals(2, page.rules.size)
+        assertEquals("发表主题", page.rules[0].action)
+        assertTrue(page.rules[0].disabled)
+        assertEquals("扣减 1 积分", page.rules[1].value)
+        assertFalse(page.rules[1].disabled)
+        assertTrue(page.ruleNote.startsWith("积分按触发动作记录"))
+    }
+
+    /**
+     * A negative row whose number lost its sign still counts down: the class is
+     * the fallback so a styling change cannot turn spending into earning.
+     */
+    @Test
+    fun pointsRowFallsBackToTheNegativeClass() {
+        val html = """<ul class="post-list"><li class="post-item points-rewards-detail negative">
+            <div class="points-rewards-detail-main"><strong class="points-rewards-reason">抽卡</strong>
+            <div class="points-rewards-detail-meta"><time class="points-rewards-time"
+            datetime="2026-08-22T09:32:50+08:00">2026-08-22 09:32</time></div></div>
+            <div class="points-rewards-detail-side"><span class="points-rewards-change-value negative">
+            <b>10</b><small>积分</small></span></div></li></ul>"""
+        assertEquals(-10, Parse.pointsLedger(html).entries.single().delta)
+    }
+
+    /** One page of ledger reports one page, not zero. */
+    @Test
+    fun pointsLedgerWithoutPaginationIsOnePage() {
+        val html = """<ul class="post-list"><li class="post-item points-rewards-detail positive">
+            <div class="points-rewards-detail-main"><strong class="points-rewards-reason">签到</strong></div>
+            <div class="points-rewards-detail-side"><span class="points-rewards-change-value positive">
+            <b>+5</b><small>积分</small></span></div></li></ul>"""
+        val page = Parse.pointsLedger(html)
+        assertEquals(1, page.page)
+        assertEquals(1, page.lastPage)
+        assertEquals(5, page.entries.single().delta)
     }
 }

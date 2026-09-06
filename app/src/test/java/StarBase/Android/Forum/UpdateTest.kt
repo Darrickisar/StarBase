@@ -149,6 +149,60 @@ class UpdateTest {
         assertEquals(2230144L, info.apkSize)
     }
 
+    /**
+     * Releases now ship one APK per ABI plus a universal one. Off the device
+     * `Build.SUPPORTED_ABIS` is not available, which is the same situation as a
+     * device reporting nothing - so the universal build has to be what comes back,
+     * rather than whichever per-ABI file happens to be listed first.
+     */
+    @Test
+    fun `a per-ABI release falls back to the universal apk when no ABI is known`() {
+        val split = """
+            {
+              "name": "StarBase-armeabi-v7a-V1.2.0.apk",
+              "size": 5976883,
+              "browser_download_url": "https://example.invalid/v7a"
+            },
+            {
+              "name": "StarBase-arm64-v8a-V1.2.0.apk",
+              "size": 7549747,
+              "browser_download_url": "https://example.invalid/arm64"
+            },
+            {
+              "name": "StarBase-universal-V1.2.0.apk",
+              "size": 22020096,
+              "browser_download_url": "https://example.invalid/universal"
+            }
+        """.trimIndent()
+        val info = requireNotNull(Releases.parse(releaseJson(split)))
+        assertEquals("StarBase-universal-V1.2.0.apk", info.apkName)
+        assertEquals("https://example.invalid/universal", info.apkUrl)
+    }
+
+    /** A release from before the split still has exactly one APK to offer. */
+    @Test
+    fun `a single-apk release is unaffected by the per-ABI preference`() {
+        val info = requireNotNull(Releases.parse(releaseJson(apkAsset)))
+        assertEquals("StarBase-v1.0.3.apk", info.apkName)
+    }
+
+    /**
+     * Per-ABI files with no universal build: something has to be offered rather
+     * than the update silently having nothing to download.
+     */
+    @Test
+    fun `per-ABI only, no universal, still offers an apk`() {
+        val split = """
+            {
+              "name": "StarBase-arm64-v8a-V1.2.0.apk",
+              "size": 7549747,
+              "browser_download_url": "https://example.invalid/arm64"
+            }
+        """.trimIndent()
+        val info = requireNotNull(Releases.parse(releaseJson(split)))
+        assertEquals("StarBase-arm64-v8a-V1.2.0.apk", info.apkName)
+    }
+
     @Test
     fun `a release with no apk still parses, with nothing to download`() {
         val info = requireNotNull(Releases.parse(releaseJson("")))

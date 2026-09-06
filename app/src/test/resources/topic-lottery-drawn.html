@@ -1,0 +1,69 @@
+<!doctype html>
+<!--
+  A guest view of a 抽奖帖 that has already drawn, hand-built the same way as
+  topic-lottery-open.html.
+
+  Two things it pins that the open fixture cannot:
+
+  * the count-triggered condition 「满 N 人自动开奖」, which carries no clock at all -
+    so `drawAt` must come out 0 and no 开奖提醒 may be offered for it;
+  * the fold wrapper. This body is long enough that the site wraps it in
+    `[data-long-content-fold]`, and the 抽奖卡 sits OUTSIDE that wrapper, as a
+    sibling after it. That is why the panel used to vanish on long lottery posts:
+    the body parser reads the fold as its root and never saw the card.
+
+  Nothing here is copied from a live page.
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>已开奖：三份兑换码 - LINUX SB</title></head>
+<body>
+<div class="wrap">
+  <h1 class="post-topic-title">已开奖：三份兑换码</h1>
+  <div class="breadcrumb"><a href="/forum/5">活动</a></div>
+  <ul class="post-list topic-post-list">
+
+    <li class="post-item post-entry" id="post-1">
+      <div class="post-avatar"><a href="/user/7"><img class="avatar-img" src="/app/avatars/a7.svg" alt="发奖的人"></a></div>
+      <div class="post-body">
+        <div class="post-head"><div class="post-info">
+          <a class="post-title post-author" href="/user/7">发奖的人</a>
+          <div class="post-meta"><span class="post-time">2026-08-28</span></div>
+        </div></div>
+        <div class="post-content">
+          <div class="long-content-fold" data-long-content-fold="1">
+            <p>攒了三份兑换码，满 500 人就开。</p>
+            <p>规则照旧：回帖满五个字，重复回帖只算一次。</p>
+          </div>
+          <section class="community-lottery-card is-drawn" data-lottery-card="1">
+            <header>
+              <div>
+                <b>抽奖帖</b>
+                <span>本次抽奖已经完成</span>
+              </div>
+              <div class="community-lottery-card-side">
+                <strong class="community-lottery-status-pill">已开奖</strong>
+                <em>512 人参与</em>
+              </div>
+            </header>
+            <ul class="community-lottery-prizes">
+              <li><strong>兑换码</strong><span>兑换码 · 3 份 · 每份 1 个烧饼</span></li>
+            </ul>
+            <div class="community-lottery-condition">满 500 人自动开奖</div>
+            <div class="community-lottery-result">实际中奖 3 人</div>
+            <div class="community-lottery-winners">
+              <strong>中奖名单</strong>
+              <ul>
+                <li><a href="/user/11">甲</a><span>兑换码</span></li>
+                <li><a href="/user/12">乙</a><span>兑换码</span></li>
+                <li><a href="/user/13">丙</a><span>兑换码</span></li>
+              </ul>
+            </div>
+          </section>
+        </div>
+      </div>
+    </li>
+
+  </ul>
+</div>
+</body>
+</html>
