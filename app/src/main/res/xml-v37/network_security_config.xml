@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The API 37 copy of the config next door, and the only difference is
+  <domainEncryption>: it turns ECH on, which defaults to disabled for an app
+  targeting below 37. See Ech.kt.
+
+  It lives in xml-v37 rather than in the one file because the tag does not exist
+  to an older platform's parser, and an unknown tag in this file is a hard parse
+  failure - which would take the app down on every device below Android 17.
+
+  HTTPS only, as next door: the app talks to one host and never needs cleartext.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+        <domainEncryption mode="enabled" />
+    </base-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">linux.sb</domain>
+        <domainEncryption mode="enabled" />
+    </domain-config>
+</network-security-config>

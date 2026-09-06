@@ -1,5 +1,10 @@
 package StarBase.Android.Forum.net
 
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -1859,6 +1864,94 @@ object Parse {
             message = doc.textOf(".form-error-panel p, .toast, .alert, .flash-message"),
             titles = titles,
             ok = titles.isNotEmpty() || doc.selectFirst(".form-error-panel") == null
+        )
+    }
+
+    /**
+     * The 人机验证 widget on /login and /register, read off the real page.
+     *
+     * Every field here is one-shot and server-bound. [token] is a signed blob that
+     * carries a hash of the expected answer, the asking IP and the asking UA, so it
+     * cannot be reused from another session or another device. [powPrefix] and
+     * [powZeros] are the work: `SHA-256(prefix + ":" + nonce)` in lowercase hex has
+     * to start with [powZeros] zeros, and the nonce is `i.toString(16)` counting up
+     * from zero - the site's own script does exactly that, so matching it is the
+     * whole requirement. [trapField] is a honeypot that must be posted empty.
+     */
+    data class LoginForm(
+        val csrf: String,
+        val question: String,
+        val token: String,
+        val powPrefix: String,
+        val powZeros: Int,
+        val powRequired: Boolean,
+        /** The refresh endpoint the page's own button calls, absolute. */
+        val refreshUrl: String,
+        /** Names the form actually posts, so a changed form is visible. */
+        val fields: List<String>,
+        val captchaRequired: Boolean = true
+    )
+
+    /**
+     * Reads the login or register form. Null when the page is not one of them -
+     * a signed-in visitor is redirected to the home page, which has no such form.
+     */
+    fun loginForm(html: String): LoginForm? {
+        if (!isLoginPage(html)) return null
+        val doc = Jsoup.parse(html, Site.BASE)
+        val form = doc.selectFirst("form:has(input[name=password])") ?: return null
+        if (doc.selectFirst(".cf-turnstile, .g-recaptcha, input[name=cf-turnstile-response], input[name=g-recaptcha-response]") != null) return null
+        val widget = form.selectFirst("[data-native-captcha]")
+        val fields = form.select("input[name], select[name], textarea[name]").map { it.attr("name") }
+        val captchaRequired = widget != null || fields.any { it.startsWith("native_captcha_") }
+        val csrf = form.selectFirst("input[name=_csrf]")?.attr("value").orEmpty()
+        val token = form.selectFirst("input[name=native_captcha_token]")?.attr("value").orEmpty()
+        if (csrf.isBlank() || (captchaRequired && (widget == null || token.isBlank()))) return null
+        return LoginForm(
+            csrf = csrf,
+            question = widget?.selectFirst(".native-captcha-question")?.text()?.trim().orEmpty(),
+            token = token,
+            powPrefix = widget?.attr("data-pow-prefix").orEmpty(),
+            // The site clamps this to 2..5 before using it; anything else is its
+            // default rather than a value to trust.
+            powZeros = widget?.attr("data-pow-zeroes")?.toIntOrNull()?.coerceIn(2, 5) ?: 3,
+            powRequired = captchaRequired && widget?.attr("data-pow-required") != "0",
+            refreshUrl = Site.absolute(
+                widget?.selectFirst("[data-native-captcha-refresh]")?.attr("data-url").orEmpty()
+            ),
+            fields = fields,
+            captchaRequired = captchaRequired
+        )
+    }
+
+    /**
+     * One refreshed 人机验证, as the page's own button asks for it.
+     *
+     * Answers `{"ok":1,"captcha":{...}}`; the fields are the widget's data
+     * attributes under their JSON names. The `_csrf` of the page it came from is
+     * still good, which is why this returns a patch rather than a whole form.
+     */
+    fun refreshedCaptcha(json: String, previous: LoginForm): LoginForm? {
+        // kotlinx rather than org.json: the same parse has to work in a JVM unit
+        // test, and org.json is a stub outside the device.
+        val root = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(json).jsonObject
+        } catch (e: Exception) {
+            return null
+        }
+        fun str(key: String): String =
+            (root["captcha"] as? kotlinx.serialization.json.JsonObject)
+                ?.get(key)?.jsonPrimitive?.contentOrNull.orEmpty()
+        if (root["ok"]?.jsonPrimitive?.intOrNull != 1) return null
+        val captcha = root["captcha"] as? kotlinx.serialization.json.JsonObject ?: return null
+        val token = str("token")
+        if (token.isBlank()) return null
+        return previous.copy(
+            question = str("question"),
+            token = token,
+            powPrefix = str("pow"),
+            powZeros = (captcha["zeros"]?.jsonPrimitive?.intOrNull ?: 3).coerceIn(2, 5),
+            powRequired = captcha["pow_required"]?.jsonPrimitive?.booleanOrNull ?: true
         )
     }
 }

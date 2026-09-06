@@ -1797,9 +1797,5 @@ internal fun drawTimeOf(opening: Post): Long {
     val (y, mo, d) = m.destructured.toList().take(3).map { it.toIntOrNull() ?: return 0L }
     val hour = m.groupValues[4].toIntOrNull() ?: 0
     val minute = m.groupValues[5].toIntOrNull() ?: 0
-    if (mo !in 1..12 || d !in 1..31 || hour !in 0..23 || minute !in 0..59) return 0L
-    return java.util.Calendar.getInstance().apply {
-        clear()
-        set(y, mo - 1, d, hour, minute)
-    }.timeInMillis
+    return Reminders.epochAt(y, mo, d, hour, minute)
 }

@@ -17,21 +17,24 @@ import android.os.SystemClock
  * [SystemClock.elapsedRealtime] rather than wall time: it cannot jump when the
  * clock or timezone changes.
  */
-class Freshness(private val windowMs: Long = DEFAULT_WINDOW_MS) {
+class Freshness(
+    private val windowMs: Long = DEFAULT_WINDOW_MS,
+    private val now: () -> Long = SystemClock::elapsedRealtime
+) {
 
     private var loadedAt = 0L
 
     /** True before anything has loaded, or once the window has passed. */
     val stale: Boolean
-        get() = loadedAt == 0L || SystemClock.elapsedRealtime() - loadedAt > windowMs
+        get() = loadedAt == 0L || now() - loadedAt > windowMs
 
     /** Seconds since the last successful load; 0 when nothing has loaded yet. */
     val ageSeconds: Long
-        get() = if (loadedAt == 0L) 0 else (SystemClock.elapsedRealtime() - loadedAt) / 1000
+        get() = if (loadedAt == 0L) 0 else (now() - loadedAt) / 1000
 
     /** Called after a load succeeds. */
     fun mark() {
-        loadedAt = SystemClock.elapsedRealtime()
+        loadedAt = now()
     }
 
     /** Forces the next check to report stale, e.g. after posting a reply. */

@@ -32,6 +32,8 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import StarBase.Android.Forum.net.Frag
+import StarBase.Android.Forum.net.SiteDns
 import StarBase.Android.Forum.net.SiteException
 import StarBase.Android.Forum.ui.components.StarMark
 import StarBase.Android.Forum.ui.glass.GlassButton
@@ -161,6 +163,31 @@ fun ErrorPanel(
             color = tokens.textSecondary,
             textAlign = TextAlign.Center
         )
+        if (kind == SiteException.Kind.NETWORK) {
+            // A name that will not resolve looks exactly like a network that is
+            // down, and both look like a handshake that was cut - three failures
+            // wearing one face. Which advice is useful depends on which switches
+            // are already flipped, so never advise doing what has already been
+            // done: DoH is on out of the box, so "换一台服务器" is the wrong first
+            // thing to say to the commonest case there is - DoH on, 分片 off.
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = when {
+                    SiteDns.enabled && !Frag.enabled ->
+                        "要是别的应用能上网，只有这里不行：直连解析已经开着了，那就试试它下面那张卡" +
+                            "——我的 → 应用设置 → 分片 (TLS)，按一下「测试」就知道这条线路是不是在按" +
+                            "域名掐你。"
+                    SiteDns.enabled ->
+                        "要是别的应用能上网，只有这里不行，可以到 我的 → 应用设置 → 域名解析 (DoH) 里换一台服务器，" +
+                            "或者关掉直连解析改回系统 DNS。"
+                    else ->
+                        "要是别的应用能上网，只有这里不行，可以到 我的 → 应用设置 → 域名解析 (DoH) 里试试直连解析。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = tokens.textTertiary,
+                textAlign = TextAlign.Center
+            )
+        }
         Spacer(Modifier.height(18.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SmallAction(text = "重试", primary = onLogin == null, onClick = onRetry)

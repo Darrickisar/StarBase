@@ -138,10 +138,15 @@ object Reminders {
     fun epochAt(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long {
         if (year < 2000 || month !in 1..12 || day !in 1..31) return 0L
         if (hour !in 0..23 || minute !in 0..59) return 0L
-        return Calendar.getInstance().apply {
-            clear()
-            set(year, month - 1, day, hour, minute)
-        }.timeInMillis
+        return try {
+            Calendar.getInstance().apply {
+                isLenient = false
+                clear()
+                set(year, month - 1, day, hour, minute)
+            }.timeInMillis
+        } catch (_: IllegalArgumentException) {
+            0L
+        }
     }
 
     /** Epoch millis for a time of day today, used when 签到 is first turned on. */

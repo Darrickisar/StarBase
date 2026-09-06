@@ -29,6 +29,24 @@ object Github {
 }
 
 /**
+ * Which native builds this device can run.
+ *
+ * Read from the system rather than from `BuildConfig`, because the APK that is
+ * running is not necessarily the one that should be downloaded next - a universal
+ * build installed on an arm64 phone should still update to the arm64 APK.
+ * [supported] keeps the platform's own preference order; [ALL] is only used to
+ * recognise a per-ABI filename so a single-APK release is not mistaken for one.
+ */
+internal object Abi {
+    val ALL = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+
+    val supported: List<String>
+        get() = runCatching { android.os.Build.SUPPORTED_ABIS?.toList() }
+            .getOrNull()?.filter { it.isNotBlank() }
+            ?: emptyList()
+}
+
+/**
  * One published release, as far as the updater cares about it.
  *
  * [apkUrl] is null for a release that has no `.apk` attached - the tag exists,
@@ -75,11 +93,22 @@ object Releases {
         if (tag.isEmpty()) return null
         if (root.flag("draft")) return null
 
-        val asset = root["assets"]?.let { assets ->
+        val apks = root["assets"]?.let { assets ->
             runCatching { assets.jsonArray }.getOrNull()
         }?.mapNotNull { element ->
             runCatching { element.jsonObject }.getOrNull()
-        }?.firstOrNull { it.text("name").endsWith(".apk", ignoreCase = true) }
+        }?.filter { it.text("name").endsWith(".apk", ignoreCase = true) }.orEmpty()
+        // Releases now carry one APK per ABI plus a universal one, so «the .apk»
+        // is no longer a single file. Preference order is this device's ABIs as the
+        // system reports them, most-preferred first, and the universal build is the
+        // fallback rather than the default - it is three times the download.
+        val asset = Abi.supported.firstNotNullOfOrNull { abi ->
+            apks.firstOrNull { it.text("name").contains("-$abi-", ignoreCase = true) }
+        }
+            ?: apks.firstOrNull { it.text("name").contains("universal", ignoreCase = true) }
+            // A release from before the split, or one that ships a single APK.
+            ?: apks.firstOrNull { name -> Abi.ALL.none { name.text("name").contains("-$it-", true) } }
+            ?: apks.firstOrNull()
 
         return ReleaseInfo(
             tag = tag,
@@ -167,6 +196,9 @@ object Releases {
      */
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            // The resolver is shared, though: if the network is lying about
+            // names, it is lying about github.com too.
+            .dns(SiteDns)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)

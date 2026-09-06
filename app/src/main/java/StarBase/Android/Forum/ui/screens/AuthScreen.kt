@@ -1,12 +1,5 @@
 package StarBase.Android.Forum.ui.screens
 
-import android.annotation.SuppressLint
-import android.graphics.Bitmap
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
@@ -33,19 +26,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -56,13 +47,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.text.KeyboardOptions
-import kotlinx.coroutines.delay
-import org.json.JSONObject
-import StarBase.Android.Forum.net.Net
+import kotlinx.coroutines.launch
+import StarBase.Android.Forum.net.Api
+import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
-import StarBase.Android.Forum.net.WebViewCookieJar
+import StarBase.Android.Forum.net.SiteException
 import StarBase.Android.Forum.ui.components.StarTile
 import StarBase.Android.Forum.ui.glass.GlassBackAction
 import StarBase.Android.Forum.ui.glass.GlassButton
@@ -79,21 +69,23 @@ import StarBase.Android.Forum.ui.theme.SbRadius
 /*
  * §07 登录/注册入口 - 独立账号页.
  *
- * The screen is native: the fields, tabs, captcha row and buttons are the ones
- * §07/§08 describe, drawn in the same glass system as the rest of the app. The
- * submission is not. linux.sb protects /login and /register with a CSRF token,
- * an arithmetic captcha bound to a signed token, a proof-of-work challenge, a
- * honeypot field and Cloudflare in front of all of it. Re-implementing that
- * would mean defeating the site's own anti-automation, so instead the site's
- * real page is kept alive in an off-screen WebView and this screen drives it:
- * values are typed into the real inputs, the real submit button is clicked, and
- * the page's own JavaScript does the proof-of-work. The app never posts the
- * credentials itself and never stores them - only the resulting session cookie
- * is picked up, from the same CookieManager the OkHttp jar reads.
+ * The screen is native and so is the submission. linux.sb protects /login and
+ * /register with a CSRF token, an arithmetic captcha bound to a signed token, a
+ * SHA-256 proof of work, a honeypot field and a minimum form age - all of which
+ * the app now satisfies itself: [Api.loginForm] reads the real page, the person
+ * answers the real question, [Api.solvePow] does the work the page's own script
+ * would have done, and [Api.login] posts the form.
  *
- * Anything the bridge cannot handle (a Cloudflare interstitial, a form whose
- * fields we cannot find, an OAuth hop) reveals that same WebView full-screen:
- * 「使用网页登录」. Nothing is a dead end.
+ * This used to drive an off-screen WebView instead, and the reason it no longer
+ * does is the network rather than the code: a WebView has its own stack, so 域名解析
+ * (DoH), 分片 and the Cronet QUIC fallback all missed it, and 「别的页面都好，只有
+ * 登录打不开」 was the result. Going through OkHttp puts 登录 on the same three
+ * mitigations as every other screen, and removes the loopback proxy that was only
+ * ever there to reach the WebView.
+ *
+ * The app posts the credentials but never stores them; what it keeps is the
+ * session cookie, in the same CookieManager the OkHttp jar reads. Anything the
+ * native form cannot do - OAuth, 忘记密码 - opens the site in the browser.
  */
 
 /** The two modes the one page switches between (§07 模式切换). */
@@ -107,138 +99,6 @@ enum class AuthMode(
     REGISTER("注册", "创建账号", "注册烧饼账号，加入社区的讨论。", "注册")
 }
 
-/**
- * Reads the live form: the captcha question, its status line, any error the page
- * is showing, and which field names this particular form actually uses.
- */
-private const val SCRAPE = """
-(function(){
-  function txt(s){ var e = document.querySelector(s); return e ? e.textContent.trim() : ''; }
-  var answer = document.querySelector('input[name=native_captcha_answer]');
-  var form = answer ? answer.form : document.querySelector('.auth-panel form, .form-panel form, form[method=post]');
-  var names = [];
-  if (form) {
-    var els = form.querySelectorAll('input,select,textarea');
-    for (var i = 0; i < els.length; i++) { if (els[i].name) names.push(els[i].name); }
-  }
-  var note = '';
-  var boxes = document.querySelectorAll('.form-panel .error, .form-panel .form-error, .form-panel .field-error, .form-panel .alert, .form-panel .tip, .auth-panel .error, .auth-panel .alert, .flash, .flash-message');
-  for (var j = 0; j < boxes.length; j++) {
-    var t = (boxes[j].textContent || '').trim();
-    if (t.length > 0 && t.length < 90) { note = t; break; }
-  }
-  return {
-    form: !!form,
-    path: location.pathname,
-    question: txt('.native-captcha-question'),
-    status: txt('.native-captcha-status'),
-    note: note,
-    names: names.join(','),
-    title: document.title
-  };
-})()
-"""
-
-/** Clicks the page's own 刷新验证码 control so a fresh signed token is issued. */
-private const val REFRESH_CAPTCHA = """
-(function(){
-  var b = document.querySelector('[data-native-captcha-refresh], .native-captcha-refresh');
-  if (b) { b.click(); return 'refreshing'; }
-  location.reload();
-  return 'reloading';
-})()
-"""
-
-/** Clicks the page's own 发送验证码 button, whatever it happens to be called. */
-private const val SEND_EMAIL_CODE = """
-(function(){
-  var all = document.querySelectorAll('button, a, input[type=button]');
-  for (var i = 0; i < all.length; i++) {
-    var t = (all[i].textContent || all[i].value || '').trim();
-    if (t.indexOf('发送验证码') >= 0 || t.indexOf('获取验证码') >= 0) { all[i].click(); return 'sent'; }
-  }
-  return 'missing';
-})()
-"""
-
-/**
- * Types the user's values into the real inputs and, when [submit] is set, clicks
- * the real submit button.
- *
- * Field lookup is name-tolerant on purpose: the login form is known
- * (`username`, `password`, `native_captcha_answer`), the register form is not,
- * so each field is matched against a list of plausible names and falls back to
- * matching by input type and order. Values are set through the native value
- * setter and followed by `input`/`change` events, which is what the page's own
- * validation listens for.
- */
-private fun fillScript(
-    user: String,
-    mail: String,
-    code: String,
-    pass: String,
-    again: String,
-    answer: String,
-    submit: Boolean
-): String {
-    val data = JSONObject()
-        .put("user", user)
-        .put("mail", mail)
-        .put("code", code)
-        .put("pass", pass)
-        .put("again", again)
-        .put("answer", answer)
-        .put("submit", submit)
-        .toString()
-    return """
-(function(){
-  var d = $data;
-  var cap = document.querySelector('input[name=native_captcha_answer]');
-  var form = cap ? cap.form : document.querySelector('.auth-panel form, .form-panel form, form[method=post]');
-  if (!form) return 'noform';
-  function set(el, v){
-    if (!el || !v) return false;
-    var p = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
-    if (p && p.set) { p.set.call(el, v); } else { el.value = v; }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
-  }
-  function named(list){
-    for (var i = 0; i < list.length; i++) {
-      var e = form.querySelector('[name="' + list[i] + '"]');
-      if (e) return e;
-    }
-    return null;
-  }
-  var pw = form.querySelectorAll('input[type=password]');
-  var user = named(['username','user','account','login','name','email_or_username']);
-  var mail = named(['email','mail','user_email','reg_email']) || form.querySelector('input[type=email]');
-  var code = named(['email_code','code','verify_code','verification_code','email_verify_code','mail_code','email_captcha']);
-  var pass = named(['password','pass','passwd']) || (pw.length > 0 ? pw[0] : null);
-  var again = named(['password2','password_confirm','confirm_password','password_again','repassword','password_repeat','password_confirmation','confirm']) || (pw.length > 1 ? pw[1] : null);
-  set(user, d.user);
-  set(mail, d.mail);
-  set(code, d.code);
-  set(pass, d.pass);
-  set(again, d.again);
-  set(cap, d.answer);
-  if (!d.submit) return 'filled';
-  var btn = form.querySelector('button[type=submit], input[type=submit]');
-  if (!btn) {
-    var bs = form.querySelectorAll('button');
-    for (var k = 0; k < bs.length; k++) {
-      if (bs[k].getAttribute('type') !== 'button') { btn = bs[k]; break; }
-    }
-  }
-  if (btn) { btn.click(); return 'submitted'; }
-  form.submit();
-  return 'posted';
-})()
-"""
-}
-
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun AuthScreen(
     startAtRegister: Boolean = false,
@@ -247,6 +107,7 @@ fun AuthScreen(
     val context = LocalContext.current
     val tokens = LocalTokens.current
     val rise = with(LocalDensity.current) { 5.dp.roundToPx() }
+    val scope = rememberCoroutineScope()
 
     var mode by remember {
         mutableStateOf(if (startAtRegister) AuthMode.REGISTER else AuthMode.LOGIN)
@@ -259,116 +120,68 @@ fun AuthScreen(
     var answer by remember { mutableStateOf("") }
     var agreed by remember { mutableStateOf(false) }
 
-    // What the live page currently says.
-    var question by remember { mutableStateOf("") }
+    // The live form. Null until the first fetch lands, and replaced wholesale by
+    // every refresh - none of its fields outlive the response they came in.
+    var form by remember { mutableStateOf<Parse.LoginForm?>(null) }
+    var loadingForm by remember { mutableStateOf(true) }
+    var formRevision by remember { mutableStateOf(0) }
     var status by remember { mutableStateOf("") }
-    var pageNote by remember { mutableStateOf("") }
-    var formFound by remember { mutableStateOf(false) }
-    var challenged by remember { mutableStateOf(false) }
-
-    var progress by remember { mutableStateOf(0) }
     var submitting by remember { mutableStateOf(false) }
-    var submittedAt by remember { mutableStateOf(0L) }
     var hint by remember { mutableStateOf("") }
-    var webShown by remember { mutableStateOf(false) }
-    var settled by remember { mutableStateOf(false) }
-    var loadSeq by remember { mutableStateOf(0) }
-    var seqAtSubmit by remember { mutableStateOf(0) }
 
-
-    /** Called for every page the auth WebView settles on. */
-    fun onSettled(url: String) {
-        val path = url.removePrefix(Site.BASE)
-        val stillAuthing = path.startsWith("/login") ||
-            path.startsWith("/register") ||
-            path.startsWith("/password_recovery")
-        when {
-            !stillAuthing && WebViewCookieJar.hasSessionCookie() && !settled -> {
-                settled = true
-                onDone(true)
-            }
-            // The site answers a completed registration by sending you to the
-            // login form, so the page switch is the success signal.
-            stillAuthing && path.startsWith("/login") && mode == AuthMode.REGISTER -> {
-                mode = AuthMode.LOGIN
-                submitting = false
-                pass = ""
-                again = ""
-                answer = ""
-                code = ""
-                hint = "注册流程已完成，请用新账号登录"
+    /** Fetches the page for [target] and takes its captcha. */
+    fun loadForm(target: AuthMode) {
+        val revision = ++formRevision
+        loadingForm = true
+        form = null
+        status = ""
+        answer = ""
+        scope.launch {
+            try {
+                val loaded = Api.loginForm(register = target == AuthMode.REGISTER)
+                if (revision != formRevision) return@launch
+                form = loaded
+                hint = ""
+            } catch (e: SiteException) {
+                if (revision != formRevision) return@launch
+                form = null
+                hint = e.message ?: "登录页加载失败"
+            } finally {
+                if (revision == formRevision) loadingForm = false
             }
         }
     }
 
-    val webView = remember {
-        val view = WebView(context)
-        view.settings.apply {
-            javaScriptEnabled = true          // the captcha and the PoW are JS
-            domStorageEnabled = true
-            userAgentString = Net.userAgent()
-            // Never a cached login page: its _csrf, its arithmetic captcha and
-            // its proof-of-work challenge are all one-shot, and a page replayed
-            // from cache submits tokens the server has already retired.
-            cacheMode = WebSettings.LOAD_NO_CACHE
-            loadWithOverviewMode = true
-            useWideViewPort = true
-            allowFileAccess = false
-            allowContentAccess = false
-            setGeolocationEnabled(false)
-            mediaPlaybackRequiresUserGesture = true
-        }
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            // OAuth leaves the site and comes back, so the hop needs its cookies.
-            setAcceptThirdPartyCookies(view, true)
-        }
-        view.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(
-                view: WebView,
-                request: WebResourceRequest
-            ): Boolean {
-                // This WebView exists to finish an authentication, and GitHub or
-                // Google sign-in necessarily leaves linux.sb - so navigation is
-                // allowed to follow, and the page is revealed while it does.
-                if (!request.url.toString().startsWith(Site.BASE)) webShown = true
-                return false
-            }
+    LaunchedEffect(Unit) { loadForm(mode) }
 
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-                progress = 12
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                progress = 100
-                loadSeq += 1
-                onSettled(url)
-            }
-        }
-        view.loadUrl(if (startAtRegister) Site.REGISTER else Site.LOGIN)
-        view
-    }
-
-    fun run(js: String) = webView.evaluateJavascript(js, null)
-
-    /** §07 模式切换: same container, the page behind it changes too. */
+    /** §07 模式切换: same container, a different page behind it. */
     fun switchTo(next: AuthMode) {
         if (next == mode || submitting) return
         mode = next
         answer = ""
-        question = ""
-        status = ""
-        pageNote = ""
         hint = ""
-        formFound = false
-        progress = 12
-        webView.loadUrl(if (next == AuthMode.REGISTER) Site.REGISTER else Site.LOGIN)
+        loadForm(next)
     }
 
     fun refreshCaptcha() {
+        val current = form ?: return loadForm(mode)
+        if (!current.captchaRequired) return loadForm(mode)
+        val revision = ++formRevision
+        loadingForm = true
         answer = ""
         status = ""
-        run(REFRESH_CAPTCHA)
+        scope.launch {
+            try {
+                val refreshed = Api.refreshCaptcha(current)
+                if (revision == formRevision) form = refreshed
+            } catch (e: SiteException) {
+                // A refresh that the site will not serve is not a dead end: the
+                // whole page can always be fetched again.
+                if (revision == formRevision) loadForm(mode)
+            } finally {
+                if (revision == formRevision) loadingForm = false
+            }
+        }
     }
 
     fun sendEmailCode() {
@@ -376,23 +189,32 @@ fun AuthScreen(
             hint = "请先填写邮箱地址"
             return
         }
-        // The site issues the code against the values in its own form, so those
-        // go in first and its own button does the sending.
-        run(fillScript(user, mail, "", "", "", answer, submit = false))
-        run(SEND_EMAIL_CODE)
-        hint = "已请求发送验证码，请查收邮箱"
+        val current = form
+        if (current == null) {
+            hint = "页面还没准备好，请稍候"
+            return
+        }
+        scope.launch {
+            hint = try {
+                Api.sendEmailCode(mail.trim(), current)
+            } catch (e: SiteException) {
+                e.message ?: "发送验证码失败"
+            }
+        }
     }
 
     fun submit() {
+        if (submitting || loadingForm) return
+        val current = form
         val problem = when {
             user.isBlank() -> if (mode == AuthMode.LOGIN) "请输入用户名或邮箱" else "请输入用户名"
             mode == AuthMode.REGISTER && mail.isBlank() -> "请输入邮箱"
-            mode == AuthMode.REGISTER && code.isBlank() -> "请输入邮箱验证码"
+            mode == AuthMode.REGISTER && current?.fields?.contains("email_code") == true && code.isBlank() -> "请输入邮箱验证码"
             pass.isBlank() -> "请输入密码"
             mode == AuthMode.REGISTER && again != pass -> "两次输入的密码不一致"
-            answer.isBlank() -> "请填写人机验证的计算结果"
+            current?.captchaRequired == true && answer.isBlank() -> "请填写人机验证的计算结果"
             !agreed -> "请先确认服务条款与隐私说明"
-            !formFound -> "站点页面还没准备好，可以改用网页登录"
+            current == null -> "站点页面还没准备好，可以改用网页登录"
             else -> ""
         }
         if (problem.isNotBlank()) {
@@ -400,77 +222,45 @@ fun AuthScreen(
             return
         }
         hint = ""
-        seqAtSubmit = loadSeq
-        submittedAt = System.currentTimeMillis()
         submitting = true
-        run(
-            fillScript(
-                user = user,
-                mail = if (mode == AuthMode.REGISTER) mail else "",
-                code = if (mode == AuthMode.REGISTER) code else "",
-                pass = pass,
-                again = if (mode == AuthMode.REGISTER) again else "",
-                answer = answer,
-                submit = true
-            )
-        )
-    }
-
-    // The page is the source of truth for the captcha, its status line and any
-    // error, so it is read on a slow tick rather than through a JS bridge.
-    LaunchedEffect(webView) {
-        while (true) {
-            webView.evaluateJavascript(SCRAPE) { raw ->
-                val page = runCatching { JSONObject(raw) }.getOrNull()
-                if (page != null) {
-                    formFound = page.optBoolean("form", false)
-                    question = page.optString("question", "")
-                    status = page.optString("status", "")
-                    pageNote = page.optString("note", "")
-                    // No form after a finished load means the site put something
-                    // else in front of it - a security check, most likely.
-                    challenged = !formFound && progress >= 100
-                    if (submitting && loadSeq > seqAtSubmit) {
-                        submitting = false
-                        answer = ""
-                        hint = pageNote.ifBlank { "提交没有通过，请检查填写内容后重试" }
-                    }
+        scope.launch {
+            try {
+                if (mode == AuthMode.LOGIN) {
+                    Api.login(user.trim(), pass, current!!, answer) { status = it }
+                    onDone(true)
+                } else {
+                    Api.register(
+                        username = user.trim(),
+                        password = pass,
+                        passwordAgain = again,
+                        email = mail.trim(),
+                        emailCode = code,
+                        form = current!!,
+                        answer = answer
+                    ) { status = it }
+                    // The site signs nobody in on registration; it sends you to
+                    // the login form, so the screen follows it there.
+                    mode = AuthMode.LOGIN
+                    pass = ""
+                    again = ""
+                    code = ""
+                    hint = "注册流程已完成，请用新账号登录"
+                    loadForm(AuthMode.LOGIN)
                 }
-            }
-            if (submitting && System.currentTimeMillis() - submittedAt > 20_000L) {
+            } catch (e: SiteException) {
+                hint = e.message ?: "提交失败，请重试"
+                // The captcha is one-shot whether it was right or wrong, so a
+                // failed submit needs a fresh question before the next try.
+                answer = ""
+                refreshCaptcha()
+            } finally {
                 submitting = false
-                hint = "站点还没有返回结果，可以改用网页登录继续"
-            }
-            delay(650)
-        }
-    }
-
-    // Nothing native can be done about a security check, so the real page takes
-    // over instead of leaving the user on a form that cannot submit.
-    LaunchedEffect(challenged) {
-        if (challenged && !webShown) {
-            delay(1200)
-            if (challenged) {
-                webShown = true
-                hint = "站点正在做安全校验，请在网页中完成"
+                status = ""
             }
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            webView.stopLoading()
-            webView.destroy()
-        }
-    }
-
-    BackHandler {
-        when {
-            webShown && webView.canGoBack() -> webView.goBack()
-            webShown -> webShown = false
-            else -> onDone(WebViewCookieJar.hasSessionCookie())
-        }
-    }
+    BackHandler { onDone(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -486,7 +276,7 @@ fun AuthScreen(
             // 1 返回我的 - a light button, not a bar in a card.
             GlassBackAction(
                 text = "返回我的",
-                onClick = { onDone(WebViewCookieJar.hasSessionCookie()) }
+                onClick = { onDone(false) }
             )
 
             Spacer(Modifier.height(26.dp))
@@ -593,44 +383,46 @@ fun AuthScreen(
                             password = true,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        Spacer(Modifier.height(10.dp))
-                        // §8.1 验证码: one input plus one small button, one row.
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            GlassField(
-                                value = code,
-                                onValue = { code = it },
-                                placeholder = "6 位邮箱验证码",
-                                glyph = "码",
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            GlassButton(
-                                text = "获取验证码",
-                                onClick = { sendEmailCode() },
-                                primary = false,
-                                compact = true,
-                                modifier = Modifier.width(96.dp)
-                            )
+                        if (form?.fields?.contains("email_code") == true) {
+                            Spacer(Modifier.height(10.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                GlassField(
+                                    value = code,
+                                    onValue = { code = it },
+                                    placeholder = "6 位邮箱验证码",
+                                    glyph = "码",
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                GlassButton(
+                                    text = "获取验证码",
+                                    onClick = { sendEmailCode() },
+                                    primary = false,
+                                    compact = true,
+                                    modifier = Modifier.width(96.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
-            // 人机验证 - the site's own question, answered here.
-            CaptchaBlock(
-                question = question,
-                status = status,
-                answer = answer,
-                onAnswer = { answer = it },
-                onRefresh = { refreshCaptcha() },
-                onSubmit = { submit() }
-            )
-
-            if (hint.isNotBlank() || pageNote.isNotBlank()) {
+            if (form?.captchaRequired == true) {
                 Spacer(Modifier.height(12.dp))
-                HintBar(text = hint.ifBlank { pageNote })
+                CaptchaBlock(
+                    question = if (loadingForm) "" else form?.question.orEmpty(),
+                    status = status,
+                    answer = answer,
+                    onAnswer = { answer = it },
+                    onRefresh = { if (!submitting) refreshCaptcha() },
+                    onSubmit = { submit() }
+                )
+            }
+
+            if (hint.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                HintBar(text = hint)
             }
 
             Spacer(Modifier.height(14.dp))
@@ -640,9 +432,9 @@ fun AuthScreen(
             Spacer(Modifier.height(16.dp))
             // 9 主操作
             GlassButton(
-                text = if (submitting) "正在提交…" else mode.action,
+                text = if (submitting) status.ifBlank { "正在提交…" } else mode.action,
                 onClick = { submit() },
-                enabled = !submitting,
+                enabled = !submitting && !loadingForm,
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -679,8 +471,7 @@ fun AuthScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(SbRadius.small))
                             .clickable {
-                                webShown = true
-                                webView.loadUrl("${Site.BASE}/password_recovery_forgot")
+                                openInBrowser(context, "${Site.BASE}/password_recovery_forgot")
                             }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     )
@@ -688,10 +479,11 @@ fun AuthScreen(
             }
 
             Spacer(Modifier.height(18.dp))
+            // OAuth leaves the site and comes back, which is a browser's job now
+            // that this screen has no WebView of its own.
             OAuthRow(
                 onProvider = { provider ->
-                    webShown = true
-                    webView.loadUrl("${Site.BASE}/oauth_login?provider=$provider")
+                    openInBrowser(context, "${Site.BASE}/oauth_login?provider=$provider")
                 }
             )
 
@@ -707,84 +499,22 @@ fun AuthScreen(
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "使用网页登录",
+                text = "在浏览器里打开登录页",
                 style = MaterialTheme.typography.labelMedium,
                 color = tokens.textSecondary,
                 textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(SbRadius.small))
-                    .clickable { webShown = true }
+                    .clickable {
+                        openInBrowser(
+                            context,
+                            if (mode == AuthMode.REGISTER) Site.REGISTER else Site.LOGIN
+                        )
+                    }
                     .padding(vertical = 8.dp)
             )
             Spacer(Modifier.height(28.dp))
-        }
-
-        // The site's own page. Off-screen while the native form drives it,
-        // full-screen the moment anything needs the user to see the real thing.
-        Box(
-            modifier = if (webShown) {
-                Modifier
-                    .fillMaxSize()
-                    .background(tokens.base)
-            } else {
-                Modifier
-                    .size(1.dp)
-                    .alpha(0f)
-            }
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                if (webShown) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .statusBarsPadding()
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "返回",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = tokens.accentWarm,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(SbRadius.small))
-                                .clickable { webShown = false }
-                                .padding(horizontal = 10.dp, vertical = 8.dp)
-                        )
-                        Text(
-                            text = "linux.sb 官方页面",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = tokens.textPrimary,
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(start = 6.dp)
-                        )
-                        Text(
-                            text = "浏览器",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = tokens.textSecondary,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(SbRadius.small))
-                                .clickable { openInBrowser(context, webView.url ?: Site.LOGIN) }
-                                .padding(horizontal = 10.dp, vertical = 8.dp)
-                        )
-                    }
-                    if (progress in 1..99) {
-                        LinearProgressIndicator(
-                            progress = { progress / 100f },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(2.dp),
-                            color = tokens.accentWarm,
-                            trackColor = tokens.hairline
-                        )
-                    }
-                }
-                AndroidView(
-                    factory = { webView },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
         }
     }
 }

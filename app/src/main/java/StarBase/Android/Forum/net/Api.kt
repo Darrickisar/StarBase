@@ -849,4 +849,196 @@ object Api {
         writeResult(Net.postBody(target.url, body), "上传头像失败")
         settingsOf(Net.getText(Site.PROFILE), "上传头像失败")
     }
+
+    // ---- 登录 / 注册 --------------------------------------------------------
+
+    /**
+     * Fetches /login or /register and reads its 人机验证 off the page.
+     *
+     * The whole form is one-shot: `_csrf`, the signed captcha token, and the
+     * proof-of-work prefix are all bound to this response, so a submit has to use
+     * what this call returned rather than anything cached. A signed-in visitor is
+     * redirected to the home page, which has no password field - that is reported
+     * as such rather than as a parse failure.
+     */
+    suspend fun loginForm(register: Boolean = false): Parse.LoginForm = io {
+        readLoginForm(Net.getText(if (register) Site.REGISTER else Site.LOGIN))
+    }
+
+    internal fun readLoginForm(html: String): Parse.LoginForm {
+        Parse.refusal(html)?.let { throw it }
+        return Parse.loginForm(html)
+            ?: if ((Parse.meOf(Jsoup.parse(html, Site.BASE))?.id ?: 0) > 0) {
+                throw SiteException("已经是登录状态，请先退出登录", SiteException.Kind.AUTH)
+            } else {
+                throw SiteException("登录页解析失败，可能是版面改版了", SiteException.Kind.PARSE)
+            }
+    }
+
+    /** Asks for a fresh 人机验证 the way the page's own 刷新 button does. */
+    suspend fun refreshCaptcha(form: Parse.LoginForm): Parse.LoginForm = io {
+        if (form.refreshUrl.isBlank()) {
+            throw SiteException("这一版页面没有刷新入口", SiteException.Kind.PARSE)
+        }
+        val json = Net.getText(form.refreshUrl, ajax = true)
+        Parse.refreshedCaptcha(json, form)
+            ?: throw SiteException("刷新验证码失败，请重开登录页", SiteException.Kind.SERVER)
+    }
+
+    /**
+     * Solves the site's proof of work: the nonce whose `SHA-256(prefix:nonce)`
+     * starts with [zeros] zeros in lowercase hex.
+     *
+     * Counting up from zero in lowercase hex is not one valid nonce among many - it
+     * is what the page's own script submits, and the answer is checked against the
+     * signed token, so this has to be the same walk. Blocking and CPU-bound; the
+     * caller runs it off the main thread. Three zeros is ~4096 hashes on average.
+     */
+    fun solvePow(prefix: String, zeros: Int): String {
+        val target = "0".repeat(zeros.coerceIn(2, 5))
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        for (i in 0 until 2_000_000) {
+            val nonce = i.toString(16)
+            digest.reset()
+            val hex = digest.digest("$prefix:$nonce".toByteArray()).joinToString("") {
+                (it.toInt() and 0xff).toString(16).padStart(2, '0')
+            }
+            if (hex.startsWith(target)) return nonce
+        }
+        throw SiteException("人机验证计算失败，请重试", SiteException.Kind.SERVER)
+    }
+
+    /**
+     * Posts /login. Returns after a fresh request confirms the signed-in user.
+     *
+     * [onStatus] is called with what is happening, because the proof of work takes
+     * long enough on a phone to look like a hang. The site also refuses a submit
+     * that arrives too soon after the page was rendered, so this waits out the rest
+     * of [MIN_FORM_AGE_MS] rather than being rejected for being quick.
+     *
+     * The failure signal is the site's own: a rejected form lands on /form_error,
+     * which [Parse.refusal] turns into the message the page is showing. Success is
+     * an identified user on a fresh home page fetched with the saved cookies.
+     * Anonymous cookies and a 200 login page do not establish a session.
+     */
+    suspend fun login(
+        username: String,
+        password: String,
+        form: Parse.LoginForm,
+        answer: String,
+        onStatus: (String) -> Unit = {}
+    ): Unit = io {
+        onStatus("正在做人机验证…")
+        val started = System.currentTimeMillis()
+        val pow = if (form.powRequired) solvePow(form.powPrefix, form.powZeros) else ""
+        val waited = System.currentTimeMillis() - started
+        if (form.captchaRequired && waited < MIN_FORM_AGE_MS) {
+            onStatus("正在提交…")
+            Thread.sleep(MIN_FORM_AGE_MS - waited)
+        }
+        onStatus("正在登录…")
+        val body = authenticationBody(form, mapOf("username" to username, "password" to password), answer, pow)
+        val html = Net.postForm(Site.LOGIN, body, ajax = false)
+        confirmLogin(html) { Net.getText("${Site.BASE}/") }
+    }
+
+    internal fun confirmLogin(html: String, sessionPage: () -> String): StarBase.Android.Forum.data.Me {
+        Parse.refusal(html)?.let { throw it }
+        if (Parse.isLoginPage(html)) {
+            throw SiteException("用户名或密码错误，或验证码答案有误", SiteException.Kind.AUTH)
+        }
+        // Anonymous visits also set cookies. Verify that the saved session can identify its user.
+        val verified = sessionPage()
+        Parse.refusal(verified)?.let { throw it }
+        val me = if (Parse.isLoginPage(verified)) null else Parse.meOf(Jsoup.parse(verified, Site.BASE))
+        return me?.takeIf { it.id > 0 }
+            ?: throw SiteException("登录状态未能确认，请重试", SiteException.Kind.AUTH)
+    }
+
+    internal fun authenticationBody(
+        form: Parse.LoginForm,
+        values: Map<String, String>,
+        answer: String,
+        pow: String
+    ): FormBody = FormBody.Builder().apply {
+        add("_csrf", form.csrf)
+        values.filterKeys { it in form.fields }.forEach { (name, value) -> add(name, value) }
+        if (form.captchaRequired) {
+            add("native_captcha_answer", answer.trim())
+            add("native_captcha_token", form.token)
+            add("native_captcha_pow", pow)
+            add("native_captcha_company", "")
+        }
+    }.build()
+
+    /**
+     * Posts /register, then leaves the caller on the login form.
+     *
+     * The site answers a completed registration by redirecting to /login rather
+     * than by signing the new account in, so there is no cookie to check here -
+     * landing on the login page *is* the success signal, and coming back to the
+     * register form (it still has `password2`) is the failure.
+     */
+    suspend fun register(
+        username: String,
+        password: String,
+        passwordAgain: String,
+        email: String,
+        emailCode: String,
+        form: Parse.LoginForm,
+        answer: String,
+        onStatus: (String) -> Unit = {}
+    ): Unit = io {
+        onStatus("正在做人机验证…")
+        val started = System.currentTimeMillis()
+        val pow = if (form.powRequired) solvePow(form.powPrefix, form.powZeros) else ""
+        val waited = System.currentTimeMillis() - started
+        if (form.captchaRequired && waited < MIN_FORM_AGE_MS) {
+            onStatus("正在提交…")
+            Thread.sleep(MIN_FORM_AGE_MS - waited)
+        }
+        onStatus("正在注册…")
+        val body = authenticationBody(form, mapOf(
+            "username" to username, "password" to password, "password2" to passwordAgain,
+            "email" to email, "email_code" to emailCode.trim()
+        ), answer, pow)
+        val html = Net.postForm(Site.REGISTER, body, ajax = false)
+        confirmRegistration(html)
+    }
+
+    internal fun confirmRegistration(html: String) {
+        Parse.refusal(html)?.let { throw it }
+        val form = Parse.loginForm(html)
+        if (!Parse.isLoginPage(html) || form == null || "password2" in form.fields) {
+            throw SiteException("注册状态未能确认，请检查填写的内容", SiteException.Kind.SERVER)
+        }
+    }
+
+    /** Asks the site to mail a registration code to [email]. */
+    suspend fun sendEmailCode(email: String, form: Parse.LoginForm): String = io {
+        val body = FormBody.Builder()
+            .add("_csrf", form.csrf)
+            .add("email", email)
+            .build()
+        val raw = Net.postForm("${Site.BASE}/user_review_email_code", body)
+        val json = try {
+            JSONObject(raw.trim())
+        } catch (e: Exception) {
+            throw SiteException("发送验证码失败，站点没有按预期回应", SiteException.Kind.PARSE)
+        }
+        if (json.optInt("ok", 0) != 1) {
+            throw SiteException(
+                json.optString("message").ifBlank { "发送验证码失败" },
+                SiteException.Kind.SERVER
+            )
+        }
+        json.optString("message").ifBlank { "验证码已发送" }
+    }
+
+    /**
+     * The site refuses a form submitted sooner than this after being rendered -
+     * its own anti-script rule. The proof of work usually covers it, so this only
+     * costs the difference.
+     */
+    private const val MIN_FORM_AGE_MS = 5_200L
 }

@@ -91,11 +91,9 @@ object Site {
 /**
  * Bridges OkHttp to the WebView's cookie store.
  *
- * The user logs in inside a real WebView - that is where the site's captcha and
- * proof-of-work scripts run - and the resulting session cookie lands in
- * Android's [CookieManager]. Reading the jar from there means native requests
- * and the WebView share one session, and it survives process death for free
- * because the WebView persists its own cookies.
+ * Native login saves the site's cookies in Android's [CookieManager]. Native
+ * requests and the remaining in-app WebView share that store, including its
+ * persistence across process restarts.
  */
 object WebViewCookieJar : CookieJar {
 
@@ -118,8 +116,8 @@ object WebViewCookieJar : CookieJar {
         }
     }
 
-    /** True when the jar holds anything that looks like a live session. */
-    fun hasSessionCookie(): Boolean {
+    /** A cheap request pre-check only. Anonymous cookies do not prove authentication. */
+    fun hasSiteCookies(): Boolean {
         val header = runCatching { manager.getCookie(Site.BASE) }.getOrNull().orEmpty()
         if (header.isBlank()) return false
         return header.split(';')
@@ -152,14 +150,68 @@ object Net {
         "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/126.0.0.0 Mobile Safari/537.36"
 
-    val client: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(WebViewCookieJar)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .callTimeout(40, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .followRedirects(true)
-        .build()
+    /**
+     * The application context, for the one thing in this client that needs one.
+     *
+     * Only [CronetFallbackInterceptor] does: a Cronet engine is built against a
+     * context. Set from `MainActivity.onCreate` before anything can make a request.
+     * A null here is not fatal - the client is built without the QUIC fallback
+     * rather than not at all, so a request from somewhere that never called this
+     * still goes out over TCP.
+     */
+    private var appContext: android.content.Context? = null
+
+    fun init(context: android.content.Context) {
+        if (appContext == null) appContext = context.applicationContext
+    }
+
+    val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .cookieJar(WebViewCookieJar)
+            // 域名解析. [SiteDns] is the system resolver until the user turns DoH on
+            // in 应用设置, and falls back to it whenever a DoH lookup comes up empty.
+            .dns(SiteDns)
+            // 分片. [SiteSockets] is an ordinary socket factory until the user turns
+            // that on too - the half of 「打不开」 that DoH cannot reach, where the
+            // address is right and the handshake is what gets cut. See [Frag].
+            .socketFactory(SiteSockets)
+            // ECH. Only on a device that has the API - below Android 17 this leaves
+            // the client exactly as it was, default factory and all, rather than
+            // routing every handshake through a wrapper that could do nothing anyway.
+            // See [Ech]: it hides the name instead of cutting it up, which is what
+            // browsers have been doing all along.
+            .apply {
+                val trust = if (Ech.available) Ech.trustManager() else null
+                if (trust != null) sslSocketFactory(SiteTls, trust)
+            }
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .callTimeout(40, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .followRedirects(true)
+            // A network interceptor runs after connecting and before writing headers.
+            // From this point a failed POST may already have reached the server.
+            .addNetworkInterceptor { chain ->
+                chain.request().tag(CronetAttempt::class.java)?.mayHaveSent = true
+                chain.proceed(chain.request())
+            }
+            // QUIC/HTTP3, and only after TCP has already failed. A network that
+            // resets the TCP handshake on the name in the ClientHello often leaves
+            // UDP/443 alone, which is the one mitigation here that does not depend
+            // on guessing what a middlebox does with fragments. See [CronetFallback].
+            .apply {
+                appContext?.let { ctx ->
+                    addInterceptor(
+                        CronetFallbackInterceptor(
+                            cookieJar = WebViewCookieJar,
+                            dns = SiteDns,
+                            context = ctx
+                        )
+                    )
+                }
+            }
+            .build()
+    }
 
     fun userAgent(): String = UA
 

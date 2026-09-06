@@ -2,14 +2,23 @@ package StarBase.Android.Forum
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import coil.Coil
+import coil.ImageLoader
 import StarBase.Android.Forum.data.ThemeMode
 import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.net.DohAuto
+import StarBase.Android.Forum.net.CronetTransport
+import StarBase.Android.Forum.net.Frag
+import StarBase.Android.Forum.net.Net
+import StarBase.Android.Forum.net.SiteDns
 import StarBase.Android.Forum.ui.Shell
 import StarBase.Android.Forum.ui.theme.StarBaseTheme
 
@@ -40,6 +49,50 @@ class MainActivity : ComponentActivity() {
         pendingTopic = intent?.getIntExtra(EXTRA_OPEN_TOPIC, 0) ?: 0
 
         val store = UserStore.get(this)
+
+        // Net initialization: Cronet needs application context for engine pool.
+        Net.init(this)
+
+        // 域名解析, before anything can make a request: the resolver is a plain
+        // object with no access to preferences, so this is where the stored
+        // setting reaches it.
+        SiteDns.configure(store.dohEnabled, store.dohChoice)
+
+        // 自动换服务器, wired here for the same reason and with the same care about
+        // which way the dependency points: [DohAuto] does the deciding and knows
+        // nothing about preferences, and this is the one place that holds both.
+        //
+        // It is allowed to move only while the stored choice is blank - that is
+        // the built-in default, which nobody picked and which is measured on one
+        // network only. A server the user chose stays chosen even when it fails;
+        // 应用设置 reports that instead. The result is remembered separately so a
+        // phone that had to move does not rediscover it every launch.
+        val main = Handler(Looper.getMainLooper())
+        DohAuto.wanted = { store.dohEnabled && store.dohServer.isBlank() }
+        DohAuto.adopt = { url ->
+            main.post {
+                if (store.dohEnabled && store.dohServer.isBlank()) {
+                    store.updateDohAuto(url)
+                    SiteDns.configure(store.dohEnabled, store.dohChoice)
+                    Net.client.connectionPool.evictAll()
+                    CronetTransport.invalidate()
+                }
+            }
+        }
+
+        // 分片, for the same reason and in the same breath.
+        Frag.configure(store.fragEnabled)
+
+        // Images go through the app's own client too, so that avatars and post
+        // pictures resolve the same way pages do. Coil would otherwise build a
+        // client of its own and ask the system resolver, which on a network that
+        // answers wrongly is exactly the half that would keep failing.
+        val imageContext = applicationContext
+        Coil.setImageLoader {
+            ImageLoader.Builder(imageContext)
+                .callFactory { Net.client }
+                .build()
+        }
 
         // themes.xml names the light room, since that is the default appearance.
         // Someone who chose a dark one would otherwise get a pale flash before

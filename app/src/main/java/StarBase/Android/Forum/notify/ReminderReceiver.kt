@@ -1,11 +1,15 @@
 package StarBase.Android.Forum.notify
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import StarBase.Android.Forum.MainActivity
 import StarBase.Android.Forum.R
 import StarBase.Android.Forum.data.Reminder
@@ -81,9 +85,18 @@ class ReminderReceiver : BroadcastReceiver() {
             .build()
 
         // Posting without the runtime permission throws on 13+; the reader may have
-        // revoked it since the alarm was set.
-        runCatching {
-            NotificationManagerCompat.from(context).notify(id, notification)
+        // revoked it since the alarm was set. Check the permission explicitly so an
+        // alarm remains harmless when notifications are disabled after scheduling.
+        if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED) &&
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        ) {
+            runCatching {
+                NotificationManagerCompat.from(context).notify(id, notification)
+            }
         }
 
         // A daily reminder has to book its own next occurrence: AlarmManager's
@@ -98,4 +111,5 @@ class ReminderReceiver : BroadcastReceiver() {
             }
         }
     }
+
 }

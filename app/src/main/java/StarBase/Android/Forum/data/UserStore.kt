@@ -167,6 +167,69 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
     )
         private set
 
+    /**
+     * 域名解析. Whether lookups go to a DoH server instead of the network's own
+     * resolver - see [StarBase.Android.Forum.net.DohResolver].
+     *
+     * **On by default.** The networks this app is actually used on are the reason:
+     * a wrong DNS answer for linux.sb looks exactly like a site that is down, and
+     * someone who cannot open the app cannot read the settings page that would fix
+     * it. The cost of the default is one round trip to a third party per name, and
+     * that party learning which names were asked for - so 应用设置 says which server
+     * is being asked and keeps the switch one press away.
+     *
+     * A DoH failure is never fatal: [StarBase.Android.Forum.net.DohResolver] falls
+     * back to the system resolver, so the default cannot make the app worse than
+     * the resolver it replaced.
+     */
+    var dohEnabled: Boolean by mutableStateOf(prefs.getBoolean(KEY_DOH, true))
+        private set
+
+    /**
+     * Which DoH endpoint the user chose. Blank means they never chose one, which
+     * is not the same as "the default": it is what lets
+     * [StarBase.Android.Forum.net.DohAuto] move off a default that does not work
+     * without ever overruling a choice somebody made.
+     */
+    var dohServer: String by mutableStateOf(prefs.getString(KEY_DOH_SERVER, "").orEmpty())
+        private set
+
+    /**
+     * Which endpoint the app moved to by itself, after the one it was using
+     * stopped answering - see [StarBase.Android.Forum.net.DohAuto].
+     *
+     * Kept apart from [dohServer] for two reasons: [dohServer] being blank has to
+     * keep meaning "nobody chose", or the first automatic switch would be the last
+     * one; and this is worth surviving a restart, so a phone on a network where
+     * the default is unreachable does not spend the first failed lookup of every
+     * launch finding that out again. Ignored entirely once [dohServer] is set.
+     */
+    var dohAuto: String by mutableStateOf(prefs.getString(KEY_DOH_AUTO, "").orEmpty())
+        private set
+
+    /**
+     * The endpoint lookups actually go to: the user's choice, else whatever was
+     * found automatically, else blank for the built-in default -
+     * [StarBase.Android.Forum.net.DohResolver.configure] reads blank as that.
+     */
+    val dohChoice: String
+        get() = dohServer.ifBlank { dohAuto }
+
+    /**
+     * 分片. Whether new connections split their TLS ClientHello - see
+     * [StarBase.Android.Forum.net.Frag].
+     *
+     * **Off by default**, unlike [dohEnabled]. The two look like the same kind of
+     * switch and are not. A wrong DNS answer is common, and a DoH answer is right
+     * or it falls back - so that default pays for itself on any network. This one
+     * is a bet about what one particular network's middlebox does with a split
+     * record: it is worth nothing where nothing is being cut, and it cannot be
+     * known without pressing 测试. That does not belong to somebody who never
+     * asked for it.
+     */
+    var fragEnabled: Boolean by mutableStateOf(prefs.getBoolean(KEY_FRAG, false))
+        private set
+
     init {
         // 1.0.3 and earlier kept 收藏 and 浏览历史 as delimited id/title strings.
         // 收藏 is the site's now and never comes back; 浏览历史 was rewritten
@@ -405,8 +468,53 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
         prefs.edit().putString(KEY_REMINDERS, Reminders.encode(reminders)).apply()
     }
 
-    fun updateCheckMode(mode: UpdateCheck) {
-        if (mode == updateCheck) return
+    // ---- 域名解析 (DoH) --------------------------------------------------------
+
+    /**
+     * Stores the DoH setting. The caller is what tells the resolver about it -
+     * this class knows nothing about the network, and the one place both are in
+     * hand is the settings screen.
+     */
+    fun updateDoh(enabled: Boolean, server: String = dohServer) {
+        val cleaned = server.trim()
+        if (enabled == dohEnabled && cleaned == dohServer) return
+        dohEnabled = enabled
+        dohServer = cleaned
+        // An explicit choice retires the automatic one rather than sitting on top
+        // of it: leaving it on disk would mean a later 「清空自定义」 silently
+        // handing the user back to a server the app picked months ago.
+        val keepAuto = if (cleaned.isBlank()) dohAuto else ""
+        dohAuto = keepAuto
+        prefs.edit()
+            .putBoolean(KEY_DOH, enabled)
+            .putString(KEY_DOH_SERVER, cleaned)
+            .putString(KEY_DOH_AUTO, keepAuto)
+            .apply()
+    }
+
+    /**
+     * Records the endpoint the app moved to on its own. Never touches
+     * [dohServer], so it cannot be mistaken for something the user chose.
+     */
+    fun updateDohAuto(server: String) {
+        val cleaned = server.trim()
+        if (cleaned == dohAuto) return
+        dohAuto = cleaned
+        prefs.edit().putString(KEY_DOH_AUTO, cleaned).apply()
+    }
+
+    /**
+     * Stores the 分片 setting. As with [updateDoh], the caller is what tells the
+     * network about it: this class keeps preferences and does not reach into
+     * [StarBase.Android.Forum.net.Frag].
+     */
+    fun updateFrag(enabled: Boolean) {
+        if (enabled == fragEnabled) return
+        fragEnabled = enabled
+        prefs.edit().putBoolean(KEY_FRAG, enabled).apply()
+    }
+
+    fun updateCheckMode(mode: UpdateCheck) {        if (mode == updateCheck) return
         updateCheck = mode
         prefs.edit().putString(KEY_UPDATE_CHECK, mode.key).apply()
     }
@@ -434,6 +542,10 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
         private const val KEY_BOARD_ORDER = "board_order"
         private const val KEY_PINNED_BOARDS = "pinned_boards"
         private const val KEY_REMINDERS = "reminders"
+        private const val KEY_DOH = "doh_enabled"
+        private const val KEY_DOH_SERVER = "doh_server"
+        private const val KEY_DOH_AUTO = "doh_server_auto"
+        private const val KEY_FRAG = "frag_enabled"
 
         /**
          * Two calls land for one visit - the tap, then the loaded title - so a
