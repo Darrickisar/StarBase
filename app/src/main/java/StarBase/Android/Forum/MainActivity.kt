@@ -20,6 +20,9 @@ import StarBase.Android.Forum.net.Frag
 import StarBase.Android.Forum.net.Net
 import StarBase.Android.Forum.net.SiteDns
 import StarBase.Android.Forum.ui.Shell
+import StarBase.Android.Forum.ui.IncomingContent
+import StarBase.Android.Forum.ui.IncomingLinks
+import StarBase.Android.Forum.ui.IncomingIntents
 import StarBase.Android.Forum.ui.theme.StarBaseTheme
 
 /**
@@ -41,12 +44,14 @@ class MainActivity : ComponentActivity() {
      * thing that runs in that case.
      */
     private var pendingTopic by mutableStateOf(0)
+    private var pendingContent by mutableStateOf<IncomingContent?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         pendingTopic = intent?.getIntExtra(EXTRA_OPEN_TOPIC, 0) ?: 0
+        pendingContent = intent?.let(::incoming)
 
         val store = UserStore.get(this)
 
@@ -109,7 +114,9 @@ class MainActivity : ComponentActivity() {
                 Shell(
                     store = store,
                     openTopicId = pendingTopic,
-                    onTopicOpened = { pendingTopic = 0 }
+                    onTopicOpened = { pendingTopic = 0 },
+                    incoming = pendingContent,
+                    onIncomingHandled = { pendingContent = null }
                 )
             }
         }
@@ -119,7 +126,10 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intent.getIntExtra(EXTRA_OPEN_TOPIC, 0).let { if (it > 0) pendingTopic = it }
+        pendingContent = incoming(intent)
     }
+
+    private fun incoming(intent: Intent): IncomingContent? = IncomingIntents.read(intent, packageName)
 
     companion object {
         /** Set by [StarBase.Android.Forum.notify.ReminderReceiver] on a 开奖 reminder. */
