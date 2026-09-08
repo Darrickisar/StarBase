@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Two directories, both inside the app's own cache, both things on their way out:
+  Only these dedicated directories can be granted to another app:
 
   - apk/   a downloaded build, handed to the platform installer.
   - share/ a 分享成图 card, handed to the share chooser.
+  - vision_drafts/ user-created, flattened screenshot attachments kept with drafts.
 
-  Nothing else is exposed, and neither directory is a store: the updater deletes
-  its download after handing it over, and share/ is swept on every new card.
+  apk/ and share/ are temporary cache paths. vision_drafts/ is private persistent
+  storage; removing its owning draft/attachment also removes the file.
 -->
 <paths>
     <cache-path name="apk" path="apk/" />
     <cache-path name="share" path="share/" />
+    <files-path name="vision_drafts" path="vision_drafts/" />
 </paths>
