@@ -1,0 +1,14 @@
+<!doctype html><html lang="zh-CN"><head><title>示例帖子</title></head><body><h1 class="post-content-title">示例帖子</h1>
+<section class="topic-collections-panel">
+<div class="topic-collections-form-wrap" data-topic-collections-form hidden><form action="/topic_collections_action" data-topic-collections-add-form method="post">
+<input name="_csrf" type="hidden" value="fixture-csrf-old"><input data-topic-collections-action name="topic_collections_action" type="hidden" value="item_add"><input name="topic_id" type="hidden" value="101">
+<label for="topic-collections-select">收录到专辑</label><select data-topic-collections-select id="topic-collections-select" name="collection_id" required>
+<option value="">选择我管理的专辑</option><option value="__topic_collections_create__">新建专辑</option></select>
+<button data-topic-collections-add-btn disabled type="submit">收录</button></form></div>
+<div class="topic-collections-create-modal" data-topic-collections-modal hidden><form action="/topic_collections_action" class="topic-collections-create-modal-form" method="post">
+<input name="_csrf" type="hidden" value="fixture-csrf-old"><input name="topic_collections_action" type="hidden" value="collection_create_add"><input name="topic_id" type="hidden" value="101">
+<label class="grid"><span>专辑名称<small>最多 80 个字符</small></span><input name="name" required type="text" value=""></label>
+<label class="grid"><span>专辑简介<small>可选</small></span><textarea name="description"></textarea></label>
+<label class="grid topic-collections-checkbox"><span>设为私密</span><input name="private" type="checkbox" value="1"></label>
+<button data-topic-collections-close type="button">取消</button><button type="submit">创建并收录</button></form></div>
+</section></body></html>

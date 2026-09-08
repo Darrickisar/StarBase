@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh-CN"><head><title>示例评议</title></head><body><h1 class="post-content-title">示例评议</h1>
+<section class="topic-essence-review-panel is-voting" data-status="voting" data-topic-essence-review>
+<div class="topic-essence-review-head"><strong>精华申请</strong><span class="topic-essence-review-status is-voting">投票中</span></div>
+<div class="topic-essence-review-progress-row"><progress max="7" value="2"></progress><strong>2 / 7</strong></div>
+<p class="topic-essence-review-note">进度 = 支持票点数 − 反对票点数；达到 7 点后停止投票，进入审批，不会自动加精。</p>
+<div class="topic-essence-review-meta"><span>支持 2 票（2 点）</span><span>反对 0 票（0 点）</span><span>投票截止 2026-09-10 10:53</span></div>
+<div class="topic-essence-review-pool-summary"><span>积分奖池</span><div><span>奖池共 700 分</span><span>待结算 700 分</span></div></div>
+<div class="topic-essence-review-actions"><form action="/topic_essence_review_vote" class="topic-essence-review-vote-form" method="post">
+<input name="_csrf" type="hidden" value="fixture-csrf-old"><input name="topic_id" type="hidden" value="101">
+<div class="topic-essence-review-vote-options" role="radiogroup"><label><input checked name="vote" type="radio" value="support"><span>支持加精</span></label><label><input name="vote" type="radio" value="oppose"><span>反对加精</span></label>
+<span class="topic-essence-review-vote-note">本票计 1 点，仅影响进度。</span></div>
+<textarea maxlength="300" name="reason" placeholder="请填写投票理由，提交后会作为一条评议回帖发布" required rows="3"></textarea><button type="submit">提交投票</button>
+</form></div></section></body></html>

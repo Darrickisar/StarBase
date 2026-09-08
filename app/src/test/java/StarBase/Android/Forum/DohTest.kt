@@ -478,6 +478,22 @@ class DohTest {
     }
 
     @Test
+    fun aFailedLookupUsesTheReplacementResolverForTheCurrentRequest() {
+        val old = Doh.PRESETS[0].url
+        val next = Doh.PRESETS[1].url
+        lateinit var resolver: DohResolver
+        resolver = DohResolver(transport = { server, _ ->
+            if (server == old) {
+                resolver.configure(true, next)
+                throw IOException("old server failed")
+            }
+            reply("linux.sb", listOf(Record(Doh.TYPE_A, 300, byteArrayOf(5, 6, 7, 8))))
+        }, system = fixedSystem)
+        resolver.configure(true, old)
+        assertEquals("5.6.7.8", resolver.lookup("linux.sb").single().hostAddress)
+    }
+
+    @Test
     fun anOldServersFailureCannotParkTheNewServer() {
         val old = Doh.PRESETS[0].url
         val next = Doh.PRESETS[1].url

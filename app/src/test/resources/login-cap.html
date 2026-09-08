@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><title>Login</title></head><body>
+<form method="post" data-slot="login.form">
+  <input type="hidden" name="_csrf" value="fixture-csrf">
+  <input name="username"><input type="password" name="password">
+  <div data-cap-verification data-cap-widget-script="https://cap.linux.sb/assets/widget.js"
+       data-cap-wasm-url="https://cap.linux.sb/assets/cap_wasm_bg.wasm">
+    <cap-widget required data-cap-api-endpoint="https://cap.linux.sb/60c41af707/"
+                data-cap-hidden-field-name="cap_token"></cap-widget>
+  </div>
+  <button>Login</button>
+</form>
+</body></html>
