@@ -875,15 +875,51 @@ object Parse {
      */
     private const val PANEL_SECTIONS = ".community-lottery-card"
 
+    fun contentBlocks(html: String): List<LiveBlock> = blocksOf(Jsoup.parseBodyFragment(html, Site.BASE).body())
+
     private fun blocksOf(content: Element): List<LiveBlock> {
         // Long posts are wrapped in a fold container; the real body is inside.
         val root = content.selectFirst("[data-long-content-fold]") ?: content
         val out = mutableListOf<LiveBlock>()
+        val emittedMedia = mutableSetOf<Element>()
 
         fun emitImage(img: Element) {
+            if (!emittedMedia.add(img)) return
             val src = img.attr("src").ifBlank { img.attr("data-src") }
             if (src.isBlank()) return
             out += LiveBlock(LiveBlock.Type.IMAGE, src = Site.absolute(src), text = img.attr("alt"))
+        }
+
+        fun emitVideo(el: Element) {
+            if (!emittedMedia.add(el)) return
+            val frame = el.tagName() == "iframe"
+            val candidates = if (frame) listOf(
+                el.attr("data-nb-editor-douyin-src"), el.attr("data-src"), el.attr("src")
+            ) else listOf(el.attr("src"), el.attr("data-src")) + el.select("source[src]").map { it.attr("src") }
+            val src = candidates.firstNotNullOfOrNull {
+                if (frame) MediaLinks.embed(it) else MediaLinks.https(it)?.toString()
+            } ?: return
+            out += LiveBlock(
+                LiveBlock.Type.VIDEO, text = el.attr("title").ifBlank { MediaLinks.provider(src) },
+                src = src, poster = MediaLinks.https(el.attr("poster"))?.toString().orEmpty(),
+                mediaType = el.attr("type").ifBlank { el.selectFirst("source[type]")?.attr("type").orEmpty() },
+                embedded = frame
+            )
+        }
+
+        fun emitVideoLink(el: Element) {
+            val src = MediaLinks.direct(el.attr("href")) ?: return
+            if (emittedMedia.add(el)) out += LiveBlock(LiveBlock.Type.VIDEO, text = el.text(), src = src)
+        }
+
+        fun emitContainedMedia(el: Element) {
+            el.select("img, video, iframe, a[href]").forEach {
+                when (it.tagName()) {
+                    "img" -> emitImage(it)
+                    "a" -> emitVideoLink(it)
+                    else -> emitVideo(it)
+                }
+            }
         }
 
         /**
@@ -926,7 +962,7 @@ object Parse {
                         }
                         // Images inside a paragraph are emitted as their own blocks
                         // by the caller; they contribute no text here.
-                        "img" -> Unit
+                        "img", "video", "iframe", "script", "style", "noscript" -> Unit
                         else -> node.childNodes().forEach { descend(it) }
                     }
                 }
@@ -949,7 +985,10 @@ object Parse {
         /** A paragraph-like run, keeping whatever links it holds. */
         fun emitPara(el: Element, type: LiveBlock.Type = LiveBlock.Type.PARA) {
             val (text, links) = inline(el)
-            if (text.isNotBlank()) out += LiveBlock(type, text = text, links = links)
+            if (text.isNotBlank()) out += LiveBlock(
+                type, text = text, links = links,
+                headingLevel = if (type == LiveBlock.Type.HEADING) el.tagName().drop(1).toIntOrNull() ?: 0 else 0
+            )
         }
 
         fun walk(el: Element) {
@@ -962,8 +1001,10 @@ object Parse {
                     if (imgs.isNotEmpty()) {
                         imgs.forEach { emitImage(it) }
                         emitPara(el)
+                        emitContainedMedia(el)
                     } else if (el.tagName() == "p") {
                         emitPara(el)
+                        emitContainedMedia(el)
                     } else {
                         el.children().forEach { walk(it) }
                         if (el.children().isEmpty() && text.isNotBlank()) {
@@ -974,18 +1015,24 @@ object Parse {
                 "h1", "h2", "h3", "h4", "h5", "h6" -> emitPara(el, LiveBlock.Type.HEADING)
                 // A quote is where a linked source most often sits, so it keeps its
                 // anchors too.
-                "blockquote" -> emitPara(el, LiveBlock.Type.QUOTE)
+                "blockquote" -> { emitPara(el, LiveBlock.Type.QUOTE); emitContainedMedia(el) }
                 "pre" ->
                     el.wholeText().trimEnd().takeIf { it.isNotBlank() }?.let {
-                        out += LiveBlock(LiveBlock.Type.CODE, it)
+                        out += LiveBlock(LiveBlock.Type.CODE, it, language =
+                            el.selectFirst("code")?.classNames()?.firstOrNull { c -> c.startsWith("language-") }
+                                ?.removePrefix("language-").orEmpty())
                     }
                 "ul", "ol" -> el.select("> li").forEach { li ->
                     emitPara(li, LiveBlock.Type.LIST_ITEM)
+                    emitContainedMedia(li)
                 }
                 "img" -> emitImage(el)
+                "video", "iframe" -> emitVideo(el)
+                "script", "style", "noscript", "source" -> Unit
                 "hr" -> out += LiveBlock(LiveBlock.Type.RULE)
                 "br" -> Unit
                 "a" -> {
+                    emitVideoLink(el)
                     val inner = el.select("> img")
                     if (inner.isNotEmpty()) {
                         inner.forEach { emitImage(it) }
@@ -1024,7 +1071,7 @@ object Parse {
         // but a post whose only child is the 抽奖卡 is empty, not a wall of panel
         // text, so the panel comes out of the clone this reads from.
         if (out.isEmpty()) {
-            val bare = root.clone().apply { select(PANEL_SECTIONS).remove() }
+            val bare = root.clone().apply { select("$PANEL_SECTIONS, script, style, noscript, iframe, video").remove() }
             bare.text().trim().takeIf { it.isNotBlank() }?.let {
                 out += LiveBlock(LiveBlock.Type.PARA, it)
             }
@@ -1889,7 +1936,8 @@ object Parse {
         val refreshUrl: String,
         /** Names the form actually posts, so a changed form is visible. */
         val fields: List<String>,
-        val captchaRequired: Boolean = true
+        val captchaRequired: Boolean = true,
+        val capChallenge: CapChallenge? = null
     )
 
     /**
@@ -1901,6 +1949,8 @@ object Parse {
         val doc = Jsoup.parse(html, Site.BASE)
         val form = doc.selectFirst("form:has(input[name=password])") ?: return null
         if (doc.selectFirst(".cf-turnstile, .g-recaptcha, input[name=cf-turnstile-response], input[name=g-recaptcha-response]") != null) return null
+        val capRequired = form.selectFirst("cap-widget, [data-cap-verification], input[name=cap_token], input[name=cap-token]") != null
+        val cap = if (capRequired) CapChallenge.from(form) ?: return null else null
         val widget = form.selectFirst("[data-native-captcha]")
         val fields = form.select("input[name], select[name], textarea[name]").map { it.attr("name") }
         val captchaRequired = widget != null || fields.any { it.startsWith("native_captcha_") }
@@ -1919,8 +1969,9 @@ object Parse {
             refreshUrl = Site.absolute(
                 widget?.selectFirst("[data-native-captcha-refresh]")?.attr("data-url").orEmpty()
             ),
-            fields = fields,
-            captchaRequired = captchaRequired
+            fields = (fields + listOfNotNull(cap?.fieldName)).distinct(),
+            captchaRequired = captchaRequired,
+            capChallenge = cap
         )
     }
 

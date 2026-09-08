@@ -247,6 +247,41 @@ class UserStore private constructor(private val prefs: SharedPreferences) {
         prefs.edit().putString(KEY_THEME, mode.key).apply()
     }
 
+    fun localSnapshot(reader: ReaderPreferences = ReaderPreferences()) = LocalBackupData(
+        themeMode, updateCheck, keepHistory, keepReadMarks, boardOrder,
+        history, readMarks, blockRules, pinnedBoards, reminders, reader
+    )
+
+    /** Imports merge personal lists; repeating the same import never duplicates entries. */
+    fun restoreLocalData(data: LocalBackupData) {
+        history = (history + data.history).groupBy { it.id }.values.map { visits ->
+            visits.maxBy { it.at }.copy(count = visits.maxOf { it.count })
+        }.sortedByDescending { it.at }.take(History.CAP)
+        var watched = 0
+        readMarks = (readMarks + data.reading).groupBy { it.topicId }.values.map { marks ->
+            marks.maxBy { it.at }.copy(seenFloor = marks.maxOf { it.seenFloor },
+                seenTotal = marks.maxOf { it.seenTotal }, watched = marks.any { it.watched })
+        }.sortedWith(compareByDescending<ReadMark> { it.watched }.thenByDescending { it.at })
+            .map { mark -> if (mark.watched) mark.copy(watched = ++watched <= Reading.WATCH_CAP) else mark }
+            .take(Reading.CAP)
+        blockRules = data.blocks.fold(blockRules) { current, rule -> Filters.add(current, rule) }
+        pinnedBoards = (pinnedBoards + data.pins).distinct().take(100)
+        reminders = Reminders.prune(data.reminders.fold(reminders) { current, reminder ->
+            Reminders.put(current, reminder)
+        }, System.currentTimeMillis())
+        themeMode = data.theme
+        updateCheck = data.updates
+        keepHistory = data.keepHistory
+        keepReadMarks = data.keepReading
+        boardOrder = data.boardOrder
+        prefs.edit().putString(KEY_THEME, themeMode.key).putString(KEY_UPDATE_CHECK, updateCheck.key)
+            .putBoolean(KEY_KEEP_HISTORY, keepHistory).putBoolean(KEY_KEEP_READ_MARKS, keepReadMarks)
+            .putString(KEY_BOARD_ORDER, boardOrder.key).putString(KEY_HISTORY, History.encode(history))
+            .putString(KEY_READ_MARKS, Reading.encode(readMarks)).putString(KEY_BLOCK_RULES, Filters.encode(blockRules))
+            .putString(KEY_PINNED_BOARDS, Boards.encodePins(pinnedBoards))
+            .putString(KEY_REMINDERS, Reminders.encode(reminders)).apply()
+    }
+
     /**
      * Records a visit. Does nothing when recording is off.
      *

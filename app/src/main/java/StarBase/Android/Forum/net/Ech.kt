@@ -203,14 +203,17 @@ object Ech {
  * the one that knows the hostname. The rest are here because the class is abstract;
  * they delegate unarmed, since without a name there is nothing to look a key up by.
  */
-class EchSocketFactory(private val inner: SSLSocketFactory) : SSLSocketFactory() {
+class EchSocketFactory(
+    private val inner: SSLSocketFactory,
+    private val handshakeTimeoutMs: Int = 0,
+) : SSLSocketFactory() {
 
     override fun getDefaultCipherSuites(): Array<String> = inner.defaultCipherSuites
 
     override fun getSupportedCipherSuites(): Array<String> = inner.supportedCipherSuites
 
     override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
-        arm(inner.createSocket(s, host, port, autoClose), host)
+        arm(inner.createSocket(s, host, port, autoClose), host, s.soTimeout)
 
     override fun createSocket(host: String, port: Int): Socket =
         arm(inner.createSocket(host, port), host)
@@ -232,13 +235,17 @@ class EchSocketFactory(private val inner: SSLSocketFactory) : SSLSocketFactory()
         localPort: Int
     ): Socket = inner.createSocket(address, port, localAddress, localPort)
 
-    private fun arm(socket: Socket, host: String): Socket {
+    private fun arm(socket: Socket, host: String, readTimeoutMs: Int = socket.soTimeout): Socket {
         if (socket is SSLSocket) Ech.apply(socket, host)
+        // OkHttp restores the caller's read timeout when it creates the HTTP codec after TLS.
+        if (handshakeTimeoutMs > 0) {
+            socket.soTimeout = if (readTimeoutMs == 0) handshakeTimeoutMs else minOf(readTimeoutMs, handshakeTimeoutMs)
+        }
         return socket
     }
 }
 
-/** What [Net] hands OkHttp on a device that can do ECH. */
+/** Platform TLS with a bounded handshake and ECH where supported. */
 val SiteTls: SSLSocketFactory by lazy {
-    EchSocketFactory(SSLSocketFactory.getDefault() as SSLSocketFactory)
+    EchSocketFactory(SSLSocketFactory.getDefault() as SSLSocketFactory, handshakeTimeoutMs = 4_000)
 }

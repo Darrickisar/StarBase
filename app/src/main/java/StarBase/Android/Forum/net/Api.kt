@@ -37,7 +37,7 @@ import StarBase.Android.Forum.data.TopicDetail
  */
 object Api {
 
-    private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
+    private suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
 
     /**
      * Reads what a write endpoint answered.
@@ -414,7 +414,8 @@ object Api {
         uploader: Parse.Uploader,
         fileName: String,
         mediaType: String,
-        bytes: ByteArray
+        bytes: ByteArray,
+        onProgress: (Long, Long) -> Unit = { _, _ -> }
     ): String = io {
         val capBytes = uploader.maxMb * 1024L * 1024L
         if (uploader.maxMb > 0 && bytes.size > capBytes) {
@@ -442,7 +443,7 @@ object Api {
             )
             .build()
 
-        val raw = Net.postBody(uploader.action, body).trim()
+        val raw = Net.postBodyCancellable(uploader.action, UploadBody(body, onProgress)).trim()
         if (!raw.startsWith("{")) {
             Parse.refusal(raw)?.let { throw it }
             throw SiteException("上传失败：站点没有按预期回应", SiteException.Kind.PARSE)
@@ -926,9 +927,10 @@ object Api {
         password: String,
         form: Parse.LoginForm,
         answer: String,
+        capToken: String = "",
         onStatus: (String) -> Unit = {}
     ): Unit = io {
-        onStatus("正在做人机验证…")
+        if (form.powRequired) onStatus("正在验证…")
         val started = System.currentTimeMillis()
         val pow = if (form.powRequired) solvePow(form.powPrefix, form.powZeros) else ""
         val waited = System.currentTimeMillis() - started
@@ -937,7 +939,7 @@ object Api {
             Thread.sleep(MIN_FORM_AGE_MS - waited)
         }
         onStatus("正在登录…")
-        val body = authenticationBody(form, mapOf("username" to username, "password" to password), answer, pow)
+        val body = authenticationBody(form, mapOf("username" to username, "password" to password), answer, pow, capToken)
         val html = Net.postForm(Site.LOGIN, body, ajax = false)
         confirmLogin(html) { Net.getText("${Site.BASE}/") }
     }
@@ -959,7 +961,8 @@ object Api {
         form: Parse.LoginForm,
         values: Map<String, String>,
         answer: String,
-        pow: String
+        pow: String,
+        capToken: String = ""
     ): FormBody = FormBody.Builder().apply {
         add("_csrf", form.csrf)
         values.filterKeys { it in form.fields }.forEach { (name, value) -> add(name, value) }
@@ -968,6 +971,12 @@ object Api {
             add("native_captcha_token", form.token)
             add("native_captcha_pow", pow)
             add("native_captcha_company", "")
+        }
+        form.capChallenge?.let { cap ->
+            if (!CapChallenge.validToken(capToken)) {
+                throw SiteException("请先完成人机验证", SiteException.Kind.AUTH)
+            }
+            add(cap.fieldName, capToken)
         }
     }.build()
 
@@ -987,9 +996,10 @@ object Api {
         emailCode: String,
         form: Parse.LoginForm,
         answer: String,
+        capToken: String = "",
         onStatus: (String) -> Unit = {}
     ): Unit = io {
-        onStatus("正在做人机验证…")
+        if (form.powRequired) onStatus("正在验证…")
         val started = System.currentTimeMillis()
         val pow = if (form.powRequired) solvePow(form.powPrefix, form.powZeros) else ""
         val waited = System.currentTimeMillis() - started
@@ -1001,7 +1011,7 @@ object Api {
         val body = authenticationBody(form, mapOf(
             "username" to username, "password" to password, "password2" to passwordAgain,
             "email" to email, "email_code" to emailCode.trim()
-        ), answer, pow)
+        ), answer, pow, capToken)
         val html = Net.postForm(Site.REGISTER, body, ajax = false)
         confirmRegistration(html)
     }

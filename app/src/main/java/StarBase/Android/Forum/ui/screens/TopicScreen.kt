@@ -11,6 +11,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,37 +26,72 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.FavoriteMark
+import StarBase.Android.Forum.data.LiveBlock
+import StarBase.Android.Forum.data.DraftKind
+import StarBase.Android.Forum.speech.TopicSpeechAction
+import StarBase.Android.Forum.speech.TopicSpeechSheet
+import StarBase.Android.Forum.ui.components.DraftComposer
 import StarBase.Android.Forum.data.Post
 import StarBase.Android.Forum.data.Reading
 import StarBase.Android.Forum.data.Reminders
 import StarBase.Android.Forum.data.TopicDetail
 import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.data.ReaderPreferenceStore
+import StarBase.Android.Forum.data.ReaderPreferences
+import StarBase.Android.Forum.data.ReaderThreadIndex
+import StarBase.Android.Forum.data.isReaderAuthor
+import StarBase.Android.Forum.data.nextReaderPage
+import StarBase.Android.Forum.data.readerHeadings
+import StarBase.Android.Forum.data.readerListKeys
+import StarBase.Android.Forum.data.readerPostKey
+import StarBase.Android.Forum.data.readerResources
+import StarBase.Android.Forum.data.readerSections
+import StarBase.Android.Forum.data.readerVisibleFloor
 import StarBase.Android.Forum.ui.components.SharePostSheet
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.ui.EmptyPanel
@@ -68,14 +105,23 @@ import StarBase.Android.Forum.ui.LoadingMark
 import StarBase.Android.Forum.ui.OnReturnToForeground
 import StarBase.Android.Forum.ui.Refreshable
 import StarBase.Android.Forum.ui.SmallAction
+import StarBase.Android.Forum.ui.TopicAddress
 import StarBase.Android.Forum.ui.components.MetaDot
 import StarBase.Android.Forum.ui.components.MetaRow
 import StarBase.Android.Forum.ui.components.ActionGlyph
 import StarBase.Android.Forum.ui.components.ActionIcon
 import StarBase.Android.Forum.ui.components.LotteryCard
+import StarBase.Android.Forum.ui.components.LightAction
 import StarBase.Android.Forum.ui.components.MetaText
 import StarBase.Android.Forum.ui.components.rememberFilePicker
 import StarBase.Android.Forum.ui.components.PostBody
+import StarBase.Android.Forum.ui.components.LocalReaderPreferences
+import StarBase.Android.Forum.ui.components.LocalPostImages
+import StarBase.Android.Forum.ui.components.ReaderBranchToggle
+import StarBase.Android.Forum.ui.components.ReaderContextSheet
+import StarBase.Android.Forum.ui.components.ReaderPanel
+import StarBase.Android.Forum.ui.components.ReaderToolbar
+import StarBase.Android.Forum.ui.components.ReaderToolsSheet
 import StarBase.Android.Forum.ui.components.UserAvatar
 import StarBase.Android.Forum.ui.components.tierColor
 import StarBase.Android.Forum.ui.components.tierLabel
@@ -98,7 +144,9 @@ import StarBase.Android.Forum.ui.theme.SbRadius
  * row of light actions, 作者/标题/标签/正文 flow into each other with no shell, and
  * comments are separated by a 1px hairline instead of being cards of their own.
  */
-class TopicViewModel : ViewModel() {
+class TopicViewModel(
+    private val fetchTopic: suspend (Int, Int) -> TopicDetail = { id, page -> Api.topic(id, page) }
+) : ViewModel() {
     var state by mutableStateOf<Load<TopicDetail>>(Load.Loading)
         private set
     var refreshing by mutableStateOf(false)
@@ -149,17 +197,19 @@ class TopicViewModel : ViewModel() {
 
     val comments = mutableStateListOf<Post>()
     private var topicId = 0
+    private var accountId = 0
+    private var identityGeneration = 0
     private var page = 1
-    private var lastPage = 1
+    private var lastPage by mutableStateOf(1)
+    private val loadedPages = mutableStateListOf<Int>()
+    private val postPages = mutableMapOf<String, Int>()
+    private var pageGeneration = 0
+    private var pagingJob: Job? = null
 
     /** Shorter window than a feed: replies land in an open thread quickly. */
     private val fresh = Freshness(windowMs = 45_000L)
 
-    /**
-     * Ceiling on the automatic paging 读到哪儿了 does. A reader who stopped at floor
-     * 900 gets as far as this takes them and the ordinary 加载更多 does the rest -
-     * better than an unbounded loop of requests off one tap.
-     */
+    /** Each explicit search can continue in another bounded batch. */
     private val MAX_AUTO_PAGES = 8
 
     /** One request at a time; a pull and the resume hook can coincide. */
@@ -175,7 +225,7 @@ class TopicViewModel : ViewModel() {
      */
     private var loadJob: Job? = null
 
-    val hasMore: Boolean get() = page < lastPage
+    val hasMore: Boolean get() = nextReaderPage(loadedPages.toSet(), lastPage) != null
     val ageSeconds: Long get() = fresh.ageSeconds
 
     /**
@@ -183,8 +233,8 @@ class TopicViewModel : ViewModel() {
      * screen and re-fetches behind it once it has aged - a busy thread collects
      * replies while you are away from it.
      */
-    fun open(id: Int) {
-        if (id == topicId && state is Load.Ready) {
+    fun open(id: Int, accountId: Int = this.accountId) {
+        if (id == topicId && accountId == this.accountId && state is Load.Ready) {
             if (fresh.stale) load(initial = false)
             return
         }
@@ -197,9 +247,15 @@ class TopicViewModel : ViewModel() {
         inFlight = false
 
         topicId = id
+        this.accountId = accountId
+        identityGeneration++
+        posting = false
+        browserReply = ""
         // Everything below belongs to the topic we just left, and a slow fetch
         // should show an empty thread rather than the previous one's comments.
         comments.clear()
+        loadedPages.clear()
+        postPages.clear()
         page = 1
         lastPage = 1
         quoting = null
@@ -222,17 +278,17 @@ class TopicViewModel : ViewModel() {
     private fun load(initial: Boolean) {
         if (inFlight) return
         inFlight = true
+        resetReaderLoading()
         // Which topic this request is for. Checked before every write, because by
         // the time the answer arrives the reader may be on another topic.
         val requested = topicId
+        val generation = pageGeneration
         loadJob = viewModelScope.launch {
             if (initial) state = Load.Loading else refreshing = true
-            page = 1
             try {
-                val detail = Api.topic(requested, 1)
-                if (requested != topicId) return@launch
-                comments.clear()
-                comments += detail.comments
+                val detail = fetchTopic(requested, 1)
+                if (requested != topicId || generation != pageGeneration) return@launch
+                replaceReaderPage(detail)
                 lastPage = detail.lastPage
                 state = Load.Ready(detail)
                 // Whatever the page just said about 收藏 wins - including a
@@ -240,14 +296,15 @@ class TopicViewModel : ViewModel() {
                 favorite = detail.favorite
                 fresh.mark()
             } catch (e: Throwable) {
-                if (requested != topicId) return@launch
+                if (e is CancellationException) throw e
+                if (requested != topicId || generation != pageGeneration) return@launch
                 if (state !is Load.Ready) state = failureOf(e)
                 else notice = (e.message ?: "刷新失败")
             } finally {
                 // Only the request that is still current may clear these; a
                 // cancelled one would otherwise unlock the guard under its
                 // replacement and let two loads run at once.
-                if (requested == topicId) {
+                if (requested == topicId && generation == pageGeneration) {
                     refreshing = false
                     inFlight = false
                 }
@@ -256,23 +313,23 @@ class TopicViewModel : ViewModel() {
     }
 
     fun loadMore() {
-        if (loadingMore || !hasMore) return
+        if (loadingMore || inFlight || locatingFloor > 0) return
+        val targetPage = nextReaderPage(loadedPages.toSet(), lastPage) ?: return
         loadingMore = true
         val requested = topicId
-        viewModelScope.launch {
+        val generation = pageGeneration
+        pagingJob = viewModelScope.launch {
             try {
-                val next = Api.topic(requested, page + 1)
+                val next = fetchTopic(requested, targetPage)
                 // A page of the topic we were reading must not be appended to the
                 // one we are reading now.
-                if (requested != topicId) return@launch
-                val known = comments.mapTo(HashSet()) { it.id }
-                comments += next.comments.filter { it.id !in known }
-                page += 1
-                lastPage = maxOf(lastPage, next.lastPage)
+                if (requested != topicId || generation != pageGeneration) return@launch
+                appendReaderPage(next)
             } catch (e: Throwable) {
-                if (requested == topicId) notice = e.message ?: "加载更多失败"
+                if (e is CancellationException) throw e
+                if (requested == topicId && generation == pageGeneration) notice = e.message ?: "加载更多失败"
             } finally {
-                if (requested == topicId) loadingMore = false
+                if (requested == topicId && generation == pageGeneration) loadingMore = false
             }
         }
     }
@@ -285,27 +342,93 @@ class TopicViewModel : ViewModel() {
      * you just wrote is at the end, and reloading page 1 would look like the
      * reply vanished.
      */
-    fun reply(body: String, onSuccess: () -> Unit) {
+    fun reply(body: String, onSuccess: () -> Unit, expectedAccountId: Int = 0, quoteOverride: Post? = quoting) {
         if (posting || body.isBlank()) return
         posting = true
-        val target = quoting
+        val target = quoteOverride
+        val requested = topicId
+        val generation = identityGeneration
         viewModelScope.launch {
             try {
-                val result = Api.reply(topicId, body.trim(), target)
-                notice = result.message.ifBlank { "已发表" }
-                quoting = null
+                if (expectedAccountId > 0) check(Api.me()?.id == expectedAccountId) { "登录账号已变化，请重新打开编辑器" }
+                val result = Api.reply(requested, body.trim(), target)
                 onSuccess()
-                loadPage(lastPage)
+                if (requested == topicId && generation == identityGeneration) {
+                    notice = result.message.ifBlank { "已发表" }
+                    quoting = null
+                    loadPage(lastPage)
+                }
             } catch (e: Api.NeedsBrowser) {
                 // Not a failure: the site wants a browser for this one, so hand
                 // the draft off instead of losing it.
-                browserReply = e.url
-                notice = e.message.orEmpty()
+                if (requested == topicId && generation == identityGeneration) {
+                    browserReply = e.url
+                    notice = e.message.orEmpty()
+                }
             } catch (e: Throwable) {
-                notice = e.message ?: "回复失败"
+                if (e is CancellationException) throw e
+                if (requested == topicId && generation == identityGeneration) notice = e.message ?: "回复失败"
             } finally {
-                posting = false
+                if (requested == topicId && generation == identityGeneration) posting = false
             }
+        }
+    }
+
+    fun pageOf(post: Post?): Int = post?.let { postPages[it.id] } ?: 1
+
+    var addressToRetry by mutableStateOf<TopicAddress?>(null)
+        private set
+
+    fun retryAddress() {
+        addressToRetry?.let { navigateAddress(it.page, it.floor, it.replyId) }
+    }
+
+    fun navigateAddress(wantedPage: Int, floor: Int, replyId: Int) {
+        val requested = topicId
+        if (requested <= 0 || inFlight) return
+        if (wantedPage <= 1 && replyId <= 0) {
+            if (floor > 0) requestJumpTo(floor)
+            return
+        }
+        pagingJob?.cancel()
+        val generation = ++pageGeneration
+        loadingMore = false
+        addressToRetry = TopicAddress(requested, wantedPage, floor, replyId)
+        locatingFloor = floor.takeIf { it > 0 } ?: Int.MAX_VALUE
+        pagingJob = viewModelScope.launch {
+            try {
+                val target = wantedPage.coerceIn(1, lastPage)
+                var fetched = 0
+                while (true) {
+                    val found = if (replyId > 0) comments.firstOrNull { it.replyId == replyId }
+                        else if (floor > 0) comments.firstOrNull { it.floor == floor }
+                        else comments.firstOrNull { postPages[it.id] == target }
+                    if (found != null) {
+                        jumpTo = found.floor
+                        addressToRetry = null
+                        return@launch
+                    }
+                    val next = if (target !in loadedPages) target
+                        else if (replyId > 0 || floor > 0) nextReaderPage(loadedPages.toSet(), lastPage) else null
+                    if (next == null) {
+                        addressToRetry = null
+                        notice = "指定回复未找到，可能已删除或需要登录"
+                        return@launch
+                    }
+                    if (fetched >= MAX_AUTO_PAGES) {
+                        notice = "本次已查找 $fetched 页，可继续查找指定回复"
+                        return@launch
+                    }
+                    val detail = fetchTopic(requested, next)
+                    if (requested != topicId || generation != pageGeneration) return@launch
+                    appendReaderPage(detail)
+                    fetched++
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (requested == topicId && generation == pageGeneration) notice = e.message ?: "无法定位回复"
+            }
+            finally { if (requested == topicId && generation == pageGeneration) locatingFloor = 0 }
         }
     }
 
@@ -396,7 +519,7 @@ class TopicViewModel : ViewModel() {
                     Api.likeTopic(topicId, points)
                 } else {
                     // The comment's form is on the page it is displayed on.
-                    Api.like(topicId, target.replyId, points, page)
+                    Api.like(topicId, target.replyId, points, postPages[target.id] ?: page)
                 }
                 notice = result.message.ifBlank {
                     if (points > 0) "已打赏 $points 积分" else "已点赞"
@@ -421,25 +544,27 @@ class TopicViewModel : ViewModel() {
      * request, and only right after you posted.
      */
     private suspend fun loadPage(target: Int) {
+        resetReaderLoading()
+        loadJob?.cancel()
         refreshing = true
         inFlight = true
         val requested = topicId
+        val generation = pageGeneration
         try {
-            var detail = Api.topic(requested, target)
+            var detail = fetchTopic(requested, target)
             if (detail.lastPage > target) {
-                detail = Api.topic(requested, detail.lastPage)
+                detail = fetchTopic(requested, detail.lastPage)
             }
-            if (requested != topicId) return
-            comments.clear()
-            comments += detail.comments
-            page = detail.page
+            if (requested != topicId || generation != pageGeneration) return
+            replaceReaderPage(detail)
             lastPage = detail.lastPage
             state = Load.Ready(detail)
             fresh.mark()
         } catch (e: Throwable) {
-            if (requested == topicId) notice = e.message ?: "刷新失败"
+            if (e is CancellationException) throw e
+            if (requested == topicId && generation == pageGeneration) notice = e.message ?: "刷新失败"
         } finally {
-            if (requested == topicId) {
+            if (requested == topicId && generation == pageGeneration) {
                 refreshing = false
                 inFlight = false
             }
@@ -487,7 +612,7 @@ class TopicViewModel : ViewModel() {
     }
 
     /**
-     * A floor the screen has been asked to scroll to, or 0 for none.
+     * A floor the screen has been asked to scroll to, -1 for the opening, or 0 for none.
      *
      * Held here rather than in the composable because the list it scrolls is
      * inside [TopicBody], and the request comes from a bar outside it. The screen
@@ -496,42 +621,111 @@ class TopicViewModel : ViewModel() {
     var jumpTo by mutableStateOf(0)
         private set
 
-    fun requestJumpTo(floor: Int) { if (floor > 0) jumpTo = floor }
+    var locatingFloor by mutableStateOf(0)
+        private set
+
+    var navigationMessage by mutableStateOf("")
+        private set
+
+    fun requestJumpTo(floor: Int) {
+        if (floor < 0) return
+        if (floor == 0) {
+            cancelReaderNavigation()
+            jumpTo = -1
+        } else findReaderFloor(floor, navigate = true)
+    }
 
     fun jumpHandled() { jumpTo = 0 }
 
-    /**
-     * Pages forward until [floor] is loaded, or until the thread runs out.
-     *
-     * 读到哪儿了 on a long thread usually points past page one, and the mark would
-     * otherwise land on "as far as page one goes" and quietly under-deliver.
-     */
-    fun loadUntilFloor(floor: Int) {
-        if (floor <= 0 || loadingMore) return
+    /** Loads context without moving the list or recording a reading mark. */
+    fun loadUntilFloor(floor: Int) = findReaderFloor(floor, navigate = false)
+
+    fun clearReaderMessage() { navigationMessage = "" }
+
+    fun cancelReaderNavigation() {
+        addressToRetry = null
+        if (locatingFloor <= 0) return
+        pagingJob?.cancel()
+        pageGeneration += 1
+        locatingFloor = 0
+    }
+
+    private fun resetReaderLoading() {
+        pagingJob?.cancel()
+        pageGeneration += 1
+        loadingMore = false
+        locatingFloor = 0
+        jumpTo = 0
+        navigationMessage = ""
+        addressToRetry = null
+    }
+
+    private fun replaceReaderPage(detail: TopicDetail) {
+        comments.clear()
+        loadedPages.clear()
+        postPages.clear()
+        lastPage = detail.lastPage
+        appendReaderPage(detail)
+    }
+
+    private fun appendReaderPage(detail: TopicDetail) {
+        val merged = (comments.toList() + detail.comments).distinctBy { it.id }
+            .sortedBy { if (it.floor > 0) it.floor else Int.MAX_VALUE }
+        comments.clear()
+        comments.addAll(merged)
+        if (detail.page !in loadedPages) loadedPages += detail.page
+        detail.comments.forEach { postPages[it.id] = detail.page }
+        page = detail.page
+        lastPage = maxOf(lastPage, detail.lastPage)
+    }
+
+    private fun findReaderFloor(floor: Int, navigate: Boolean) {
+        if (floor <= 0) return
+        if (loadingMore || inFlight || locatingFloor > 0) {
+            navigationMessage = "正在加载，请稍后重试"
+            notice = navigationMessage
+            return
+        }
+        if (comments.any { it.floor == floor }) {
+            navigationMessage = ""
+            if (navigate) jumpTo = floor
+            return
+        }
+        if ((state as? Load.Ready)?.value?.commentsNeedLogin == true) {
+            navigationMessage = "登录后才能查找评论"
+            notice = navigationMessage
+            return
+        }
         val requested = topicId
-        viewModelScope.launch {
-            var guard = 0
-            while (
-                requested == topicId &&
-                hasMore &&
-                comments.none { it.floor >= floor } &&
-                guard < MAX_AUTO_PAGES
-            ) {
-                guard += 1
-                loadingMore = true
-                try {
-                    val next = Api.topic(requested, page + 1)
-                    if (requested != topicId) return@launch
-                    val known = comments.mapTo(HashSet()) { it.id }
-                    comments += next.comments.filter { it.id !in known }
-                    page += 1
-                    lastPage = maxOf(lastPage, next.lastPage)
-                } catch (e: Throwable) {
-                    if (requested == topicId) notice = e.message ?: "加载更多失败"
-                    return@launch
-                } finally {
-                    if (requested == topicId) loadingMore = false
+        val generation = pageGeneration
+        locatingFloor = floor
+        navigationMessage = "正在查找 #$floor"
+        pagingJob = viewModelScope.launch {
+            try {
+                var fetched = 0
+                while (fetched < MAX_AUTO_PAGES) {
+                    val targetPage = nextReaderPage(loadedPages.toSet(), lastPage) ?: break
+                    val next = fetchTopic(requested, targetPage)
+                    if (requested != topicId || generation != pageGeneration) return@launch
+                    appendReaderPage(next)
+                    fetched += 1
+                    if (comments.any { it.floor == floor }) {
+                        navigationMessage = "已找到 #$floor"
+                        if (navigate) jumpTo = floor
+                        return@launch
+                    }
                 }
+                navigationMessage = if (hasMore) "本次已查找 $fetched 页，再次操作可继续查找 #$floor"
+                    else "未找到 #$floor，楼层可能已删除或不可见"
+                notice = navigationMessage
+            } catch (e: Throwable) {
+                if (e is CancellationException) throw e
+                if (requested == topicId && generation == pageGeneration) {
+                    navigationMessage = e.message ?: "查找失败，请重试"
+                    notice = navigationMessage
+                }
+            } finally {
+                if (requested == topicId && generation == pageGeneration) locatingFloor = 0
             }
         }
     }
@@ -559,10 +753,19 @@ fun TopicScreen(
     /** Offers 开奖提醒 for a draw whose time is known, from either source. */
     onSetDrawReminder: (topicId: Int, title: String, drawAt: Long) -> Unit = { _, _, _ -> },
     /** Takes that alarm back off the system; the same button does both. */
-    onCancelDrawReminder: (topicId: Int) -> Unit = {}
+    onCancelDrawReminder: (topicId: Int) -> Unit = {},
+    accountId: Int = 0,
+    draftId: String? = null,
+    initialPage: Int = 1,
+    initialFloor: Int = 0,
+    initialReplyId: Int = 0,
+    onCollections: () -> Unit = {},
+    onEssence: () -> Unit = {}
 ) {
-    LaunchedEffect(topicId) { vm.open(topicId) }
+    LaunchedEffect(topicId, accountId) { vm.open(topicId, accountId) }
     OnReturnToForeground(topicId) { vm.refreshIfStale() }
+    val context = LocalContext.current.applicationContext
+    val readerPreferences = remember(context) { ReaderPreferenceStore(context) }
 
     /*
      * 读到哪儿了.
@@ -573,26 +776,14 @@ fun TopicScreen(
      */
     var resume by remember(topicId) { mutableStateOf(store.readMark(topicId)) }
     var resumeDismissed by remember(topicId) { mutableStateOf(false) }
+    var advancedExpanded by remember(topicId, accountId) { mutableStateOf(false) }
+    var speechSheet by remember(topicId, accountId) { mutableStateOf(false) }
+    var onlyAuthor by remember(topicId, accountId) { mutableStateOf(false) }
+    var branches by remember(topicId, accountId) { mutableStateOf(false) }
+    var readerPanel by remember(topicId, accountId) { mutableStateOf<ReaderPanel?>(null) }
 
     // 分享成图: which post the sheet is showing, or null when it is closed.
     var sharing by remember { mutableStateOf<Post?>(null) }
-
-    // 附件: the picker has to be remembered at the screen level, and what it yields
-    // is markdown the reply bar appends to whatever is typed.
-    var pendingInsert by remember { mutableStateOf<((String) -> Unit)?>(null) }
-    val pickFile = rememberFilePicker(maxMb = 20) { picked ->
-        val insert = pendingInsert
-        pendingInsert = null
-        picked
-            .onSuccess { file ->
-                vm.attach(file.name, file.mediaType, file.bytes) { md -> insert?.invoke(md) }
-            }
-            .onFailure { vm.showNotice(it.message ?: "读不到这个文件") }
-    }
-    val onAttach: ((String) -> Unit) -> Unit = { insert ->
-        pendingInsert = insert
-        pickFile()
-    }
 
     /*
      * Records the visit against the live count.
@@ -601,7 +792,14 @@ fun TopicScreen(
      * to show. What it stores is the reply count the page just reported, which is
      * the baseline the 「多了 N 条」 line counts from next time.
      */
-    val detailForMark = (vm.state as? Load.Ready)?.value
+    val detailForMark = (vm.state as? Load.Ready)?.value?.takeIf { it.id == topicId }
+    var addressApplied by remember(topicId, accountId, initialPage, initialFloor, initialReplyId) { mutableStateOf(false) }
+    LaunchedEffect(detailForMark?.id, initialPage, initialFloor, initialReplyId, vm.refreshing) {
+        if (detailForMark != null && !addressApplied && !vm.refreshing) {
+            addressApplied = true
+            vm.navigateAddress(initialPage, initialFloor, initialReplyId)
+        }
+    }
     LaunchedEffect(topicId, detailForMark?.commentCount, detailForMark?.title) {
         val detail = detailForMark ?: return@LaunchedEffect
         store.recordRead(
@@ -621,22 +819,23 @@ fun TopicScreen(
         }
     }
 
+    val loadedImages = (listOfNotNull(detailForMark?.opening) + vm.comments.toList())
+        .flatMap { it.blocks }
+        .filter { it.type == LiveBlock.Type.IMAGE }
+        .map { it.src }.filter { it.isNotBlank() }.distinct()
+    CompositionLocalProvider(
+        LocalReaderPreferences provides readerPreferences.value,
+        LocalPostImages provides loadedImages
+    ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val detail = (vm.state as? Load.Ready)?.value
-        // §5.1: the bar carries the board, not the post title - the title itself
-        // belongs to the reading flow below, at reading size. And it carries
-        // nothing else: 返回 / 板块名 / 收藏 / 刷新 is the whole list, so the
-        // comment count lives in the 全部评论 header and the refresh state lives
-        // in the action's own label.
-        // 追帖 is the app's own, and it sits in the bar's own local slot rather
-        // than taking 收藏's or 刷新's - which is also why it does not need a
-        // strip of page width below the bar. A guest gets it too: it wants the
-        // title and the reply count, both of which are on the page already.
+        // Keep secondary tools anchored to the bar so they do not displace the post.
         val watched = store.readMark(topicId)?.watched == true
         DetailBar(
             title = detail?.forumName.orEmpty().ifBlank { "帖子" },
             onBack = onBack,
             action = if (vm.refreshing) "更新中" else "刷新",
+            actionIcon = Icons.Outlined.Refresh,
             onAction = vm::refresh,
             localAction = if (detail != null) (if (watched) "已追" else "追帖") else "",
             localActive = watched,
@@ -659,10 +858,77 @@ fun TopicScreen(
                     )
                 }
             },
-            // 收藏 is the site's, so the action only exists when the page
-            // rendered the form - a guest gets 返回 / 板块名 / 刷新 and nothing
-            // that would fail if pressed. The label is the site's own wording.
+            advancedAction = if (detail != null) {
+                {
+                    Box {
+                        LightAction(
+                            text = "高级",
+                            active = advancedExpanded,
+                            modifier = Modifier.semantics {
+                                role = Role.Button
+                                stateDescription = if (advancedExpanded) "已展开" else "已收起"
+                            },
+                            onClick = { advancedExpanded = !advancedExpanded }
+                        )
+                        DropdownMenu(
+                            expanded = advancedExpanded,
+                            onDismissRequest = { advancedExpanded = false }
+                        ) {
+                            Column(
+                                modifier = Modifier.width(320.dp).padding(vertical = 4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    TopicSpeechAction {
+                                        advancedExpanded = false
+                                        speechSheet = true
+                                    }
+                                    TextButton(onClick = {
+                                        advancedExpanded = false
+                                        onCollections()
+                                    }) { Text("收录到淘帖") }
+                                    TextButton(onClick = {
+                                        advancedExpanded = false
+                                        onEssence()
+                                    }) { Text("申精") }
+                                }
+                                ReaderToolbar(
+                                    onlyAuthor = onlyAuthor,
+                                    branches = branches,
+                                    canFilterAuthor = detail.opening != null,
+                                    onOnlyAuthor = {
+                                        onlyAuthor = it
+                                        advancedExpanded = false
+                                    },
+                                    onBranches = {
+                                        branches = it
+                                        advancedExpanded = false
+                                    },
+                                    onPanel = {
+                                        vm.clearReaderMessage()
+                                        readerPanel = it
+                                        advancedExpanded = false
+                                    }
+                                )
+                                if (vm.addressToRetry != null && vm.locatingFloor == 0) {
+                                    TextButton(
+                                        onClick = {
+                                            advancedExpanded = false
+                                            vm.retryAddress()
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text("继续查找") }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else null,
+            // The site's favorite action exists only when the page supplies its form.
             secondAction = vm.favorite?.let { if (vm.favoriting) "处理中" else it.label }.orEmpty(),
+            secondActionIcon = if (vm.favorite?.on == true) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
             onSecondAction = vm::toggleFavorite
         )
 
@@ -731,6 +997,12 @@ fun TopicScreen(
                         detail = s.value,
                         canReply = s.value.canReply || signedIn,
                         store = store,
+                        onlyAuthor = onlyAuthor,
+                        branches = branches,
+                        panel = readerPanel,
+                        onOnlyAuthor = { onlyAuthor = it },
+                        onBranches = { branches = it },
+                        onPanel = { readerPanel = it },
                         onUser = onUser,
                         onForum = onForum,
                         onTopic = onTopic,
@@ -738,6 +1010,9 @@ fun TopicScreen(
                         onRegister = onRegister,
                         onOpenLink = onOpenLink,
                         onShare = { sharing = it },
+                        preferences = readerPreferences.value,
+                        onPreferences = readerPreferences::update,
+                        readingBlocked = advancedExpanded || speechSheet || sharing != null || vm.likeTarget != null,
                         onRemindDraw = { at ->
                             onSetDrawReminder(topicId, s.value.title, at)
                         },
@@ -761,14 +1036,13 @@ fun TopicScreen(
                         onPick = vm::like,
                         onCancel = vm::cancelLike
                     )
-                } else if (s.value.canReply || signedIn) {
-                    ReplyBar(
-                        posting = vm.posting,
-                        uploading = vm.uploading,
-                        quoting = vm.quoting,
-                        onCancelQuote = { vm.quote(null) },
-                        onAttach = onAttach,
-                        onSend = { text, done -> vm.reply(text) { done() } }
+                } else if (accountId > 0 && (s.value.canReply || signedIn)) {
+                    DraftComposer(
+                        accountId = accountId, kind = DraftKind.REPLY, targetId = topicId,
+                        draftId = draftId, sending = vm.posting, placeholder = "写下评论",
+                        quote = vm.quoting, quotePage = vm.pageOf(vm.quoting), onQuote = vm::quote,
+                        uploader = { Api.replyUploader(topicId) }, onNotice = vm::showNotice,
+                        onSend = { text, quote, done -> vm.reply(text, done, accountId, quote) }
                     )
                 }
             }
@@ -779,6 +1053,13 @@ fun TopicScreen(
     // exported bitmap are the same composable.
     val shareTarget = sharing
     val detail = (vm.state as? Load.Ready)?.value
+    if (speechSheet && detail != null) {
+        TopicSpeechSheet(
+            detail = detail.copy(comments = vm.comments.toList()),
+            accountId = accountId,
+            onDismiss = { speechSheet = false }
+        )
+    }
     if (shareTarget != null && detail != null) {
         SharePostSheet(
             post = shareTarget,
@@ -789,6 +1070,7 @@ fun TopicScreen(
             onNotice = { vm.showNotice(it) }
         )
     }
+    }
 }
 
 @Composable
@@ -797,6 +1079,12 @@ private fun TopicBody(
     detail: TopicDetail,
     canReply: Boolean,
     store: UserStore,
+    onlyAuthor: Boolean,
+    branches: Boolean,
+    panel: ReaderPanel?,
+    onOnlyAuthor: (Boolean) -> Unit,
+    onBranches: (Boolean) -> Unit,
+    onPanel: (ReaderPanel?) -> Unit,
     onUser: (Int) -> Unit,
     onForum: (Int) -> Unit,
     onTopic: (Int) -> Unit,
@@ -804,6 +1092,9 @@ private fun TopicBody(
     onRegister: () -> Unit,
     onOpenLink: (String) -> Unit,
     onShare: (Post) -> Unit,
+    preferences: ReaderPreferences,
+    onPreferences: (ReaderPreferences) -> Unit,
+    readingBlocked: Boolean,
     /** 开奖提醒, set from the 抽奖卡's own condition row. */
     onRemindDraw: (Long) -> Unit = {},
     onCancelDraw: () -> Unit = {},
@@ -812,77 +1103,97 @@ private fun TopicBody(
     val tokens = LocalTokens.current
     val listState = rememberLazyListState()
     val pad = SbMetrics.pagePadding
+    val scope = rememberCoroutineScope()
+    val loaded = vm.comments.toList()
+    var expanded by remember(detail.id) { mutableStateOf(emptySet<String>()) }
+    var contextPost by remember(detail.id) { mutableStateOf<Post?>(null) }
+    val index = remember(detail.opening, loaded) { ReaderThreadIndex(detail.opening, loaded) }
+    val selectedPosts = remember(loaded, onlyAuthor, detail.opening) {
+        if (onlyAuthor) loaded.filter { isReaderAuthor(it, detail.opening) } else loaded
+    }
+    val displayIndex = remember(detail.opening, selectedPosts) { ReaderThreadIndex(detail.opening, selectedPosts) }
+    val rows = remember(displayIndex, branches, expanded) { displayIndex.rows(branches, expanded) }
+    val sections = remember(detail.opening) { readerSections(detail.opening?.blocks.orEmpty()) }
+    val headings = remember(detail.opening) { readerHeadings(detail.opening?.blocks.orEmpty()) }
+    val listKeys = remember(detail.opening, sections, rows) { readerListKeys(detail.opening, sections, rows) }
 
     /*
      * 本地折叠. A map of post id -> the rule that folded it, recomputed whenever
      * the rules or the comments change. Nothing is removed from the list: a thread
      * with #12 missing reads as though the site lost it.
      */
-    val folded = remember(store.blockRules, vm.comments.size) {
-        Filters.posts(store.blockRules, vm.comments)
+    val folded = remember(store.blockRules, loaded) {
+        Filters.posts(store.blockRules, loaded)
     }
     // Which folded replies the reader has opened anyway, this visit only.
     val unfolded = remember(detail.id) { mutableStateListOf<String>() }
 
-    /*
-     * 读到哪儿了: the scroll half.
-     *
-     * The comments are laid out after exactly two fixed items - the reading flow
-     * and the 全部评论 header - so comment `n` is list item `n + COMMENTS_OFFSET`.
-     * That coupling is why the constant sits next to the LazyColumn below rather
-     * than being rediscovered from the layout at runtime.
-     */
-    LaunchedEffect(vm.jumpTo, vm.comments.size, vm.hasMore) {
-        val floor = vm.jumpTo
-        if (floor <= 0) return@LaunchedEffect
-        val index = vm.comments.indexOfFirst { it.floor >= floor }
-        if (index >= 0) {
-            listState.animateScrollToItem(index + COMMENTS_OFFSET)
-            vm.jumpHandled()
-        } else if (vm.hasMore) {
-            // The floor is on a page that has not been read yet. Ask for more;
-            // this effect runs again as they land.
-            vm.loadUntilFloor(floor)
-        } else {
-            // The thread is shorter than it was - the reply was deleted. Land on
-            // the last one there is rather than doing nothing.
-            if (vm.comments.isNotEmpty()) {
-                listState.animateScrollToItem(vm.comments.lastIndex + COMMENTS_OFFSET)
+    val readingInput = remember(detail.id, loaded, onlyAuthor, branches, expanded,
+        folded, unfolded.toList(), preferences, panel, contextPost, readingBlocked) { mutableStateOf(false) }
+    val armReading by rememberUpdatedState({ readingInput.value = true })
+    val readingScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) armReading()
+                return Offset.Zero
             }
-            vm.jumpHandled()
         }
     }
+    var resumed by remember { mutableStateOf(false) }
+    LifecycleResumeEffect(detail.id) {
+        resumed = true
+        onPauseOrDispose { resumed = false }
+    }
 
-    /*
-     * Records the furthest floor scrolled into view.
-     *
-     * Read off the layout rather than from a scroll callback, so it costs nothing
-     * while the list is still - [snapshotFlow] only emits when the visible range
-     * changes. The index arithmetic is the inverse of the jump above.
-     */
-    LaunchedEffect(detail.id, vm.comments.size) {
+    LaunchedEffect(vm.jumpTo, listKeys, onlyAuthor, branches) {
+        val floor = vm.jumpTo
+        if (floor == 0) return@LaunchedEffect
+        readingInput.value = false
+        if (onlyAuthor || branches) {
+            onOnlyAuthor(false)
+            onBranches(false)
+            return@LaunchedEffect
+        }
+        val target = loaded.firstOrNull { it.floor == floor }
+        if (target != null && target.id in folded && target.id !in unfolded) unfolded += target.id
+        val key = if (floor < 0) "head" else target?.let(::readerPostKey)
+        val targetIndex = listKeys.indexOf(key)
+        if (targetIndex >= 0) listState.scrollToItem(targetIndex)
+        else vm.showNotice("目标楼层已不在当前内容中")
+        onPanel(null)
+        contextPost = null
+        vm.jumpHandled()
+    }
+
+    val readablePosts by rememberUpdatedState(rows.map { it.post }
+        .filter { it.id !in folded || it.id in unfolded }.associateBy(::readerPostKey))
+    val mayRecord by rememberUpdatedState(readingInput.value && resumed && !onlyAuthor && !branches &&
+        panel == null && contextPost == null && !readingBlocked && !vm.refreshing &&
+        !vm.loadingMore && vm.locatingFloor == 0 && vm.jumpTo == 0)
+    val currentDetail by rememberUpdatedState(detail)
+    LaunchedEffect(detail.id, listState) {
         snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo
-                .maxOfOrNull { info ->
-                    val commentIndex = info.index - COMMENTS_OFFSET
-                    vm.comments.getOrNull(commentIndex)?.floor ?: 0
-                } ?: 0
+            val layout = listState.layoutInfo
+            readerVisibleFloor(
+                layout.visibleItemsInfo.filter { it.offset + it.size > layout.viewportStartOffset &&
+                    it.offset < layout.viewportEndOffset }.map { it.key.toString() },
+                readablePosts,
+                enabled = mayRecord && listState.isScrollInProgress
+            )
         }.collect { floor ->
-            if (floor > 0) {
+            if (floor > (store.readMark(detail.id)?.seenFloor ?: 0)) {
                 store.recordRead(
                     topicId = detail.id,
                     floor = floor,
-                    total = detail.commentCount,
-                    title = detail.title
+                    total = currentDetail.commentCount,
+                    title = currentDetail.title
                 )
             }
         }
     }
 
-    // Two items precede the comments, and 读到哪儿了 maps floors to list indices
-    // through that count - so anything inserted above the comment list has to be
-    // counted here too.
-    LazyColumn(state = listState, modifier = modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth()) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().weight(1f).nestedScroll(readingScroll)) {
         // §5.2 作者 -> 标题 -> 标签 -> 正文, one continuous flow, no card shell.
         item("head") {
             Gap(14)
@@ -916,16 +1227,15 @@ private fun TopicBody(
         }
 
         detail.opening?.let { opening ->
-            item("body") {
-                Gap(16)
+            itemsIndexed(sections, key = { _, section -> section.key }) { _, section ->
+                PostBody(
+                    blocks = section.blocks,
+                    onLinkClick = onOpenLink,
+                    modifier = Modifier.padding(horizontal = pad).padding(top = 16.dp)
+                )
+            }
+            item("body-actions") {
                 Column(modifier = Modifier.padding(horizontal = pad)) {
-                    if (opening.blocks.isNotEmpty()) {
-                        PostBody(
-                            blocks = opening.blocks,
-                            onLinkClick = onOpenLink,
-                            onImageClick = onOpenLink
-                        )
-                    }
                     // 抽奖卡, in the site's own place: the end of .post-content,
                     // under the body and above the actions. It carries 开奖时间 -
                     // which the app never used to show at all - and 开奖提醒 rides
@@ -988,13 +1298,13 @@ private fun TopicBody(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "全部评论",
+                    text = if (onlyAuthor) "只看楼主" else if (branches) "讨论分支" else "全部评论",
                     style = MaterialTheme.typography.titleSmall,
                     color = tokens.textPrimary
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = "${detail.commentCount}",
+                    text = if (onlyAuthor || branches) "已显示 ${rows.size} / 已加载 ${loaded.size}" else "${detail.commentCount}",
                     style = MaterialTheme.typography.labelMedium,
                     color = tokens.textTertiary
                 )
@@ -1008,11 +1318,16 @@ private fun TopicBody(
             vm.comments.isEmpty() -> item("no-comments") {
                 EmptyPanel("还没有人评论", "来做第一个吧")
             }
+            rows.isEmpty() -> item("no-author-comments") {
+                EmptyPanel("已加载的评论中没有楼主回复", if (vm.hasMore) "还有未加载的评论" else "")
+            }
             else -> {
-                itemsIndexed(vm.comments, key = { i, p -> "${p.id}-$i" }) { index, post ->
+                itemsIndexed(rows, key = { _, row -> readerPostKey(row.post) }) { rowIndex, row ->
+                    val post = row.post
                     // §6.5 分隔只用一条 1px 低透明度线, 不做独立卡片.
-                    if (index > 0) Hairline(startInset = pad.value.toInt() + 45)
+                    if (rowIndex > 0) Hairline(startInset = pad.value.toInt() + 45)
                     val rule = folded[post.id]
+                    Column(Modifier.padding(start = (row.depth.coerceAtMost(3) * 12).dp)) {
                     if (rule != null && post.id !in unfolded) {
                         // 本地折叠: one line saying which rule did it, and a way
                         // past it. The reply is still here and still numbered.
@@ -1028,14 +1343,29 @@ private fun TopicBody(
                             onOpenLink = onOpenLink,
                             onQuote = if (canReply) ({ vm.quote(post) }) else null,
                             onLike = if (canReply) ({ vm.askLike(post) }) else null,
-                            onShare = { onShare(post) }
+                            onShare = { onShare(post) },
+                            onParent = { vm.clearReaderMessage(); contextPost = post }
                         )
                     }
-                }
-                item("footer") {
-                    ListFooter(vm.loadingMore, vm.hasMore, vm::loadMore)
+                    if (row.childCount > 0) {
+                        ReaderBranchToggle(
+                            count = row.childCount,
+                            expanded = branches && post.id in expanded,
+                            onClick = {
+                                val wasExpanded = branches && post.id in expanded
+                                onBranches(true)
+                                expanded = if (wasExpanded) expanded - post.id
+                                    else expanded + displayIndex.ancestorIds(post) + post.id
+                            },
+                            modifier = Modifier.padding(start = pad)
+                        )
+                    }
+                    }
                 }
             }
+        }
+        item("footer") {
+            ListFooter(vm.loadingMore || vm.locatingFloor > 0, vm.hasMore, vm::loadMore)
         }
 
         // §6.1 未登录评论入口: after the list, one compact glass bar.
@@ -1073,16 +1403,61 @@ private fun TopicBody(
         }
         item("tail") { Gap(28) }
     }
-}
+    }
 
-/**
- * How many list items sit above the first comment in [TopicBody]'s LazyColumn:
- * the reading flow, then the 全部评论 header.
- *
- * 读到哪儿了 converts between floors and list indices with this, in both
- * directions, so an item added above the comment list has to be counted here.
- */
-private const val COMMENTS_OFFSET = 2
+    panel?.let { activePanel ->
+        val resources = remember(detail.id, detail.opening, loaded) { readerResources(detail.id, detail.opening, loaded) }
+        ReaderToolsSheet(
+            panel = activePanel,
+            headings = headings,
+            resources = resources,
+            loadedReplies = loaded.size,
+            hasMore = vm.hasMore,
+            loading = vm.loadingMore || vm.locatingFloor > 0 || vm.refreshing,
+            message = vm.navigationMessage,
+            preferences = preferences,
+            onPreferences = onPreferences,
+            onHeading = { heading ->
+                readingInput.value = false
+                onPanel(null)
+                scope.launch { listKeys.indexOf(heading.key).takeIf { it >= 0 }?.let { listState.scrollToItem(it) } }
+            },
+            onResource = { uri ->
+                if (uri.scheme in listOf("https", "http") && !uri.host.isNullOrBlank() && uri.userInfo.isNullOrEmpty()) {
+                    onOpenLink(uri.toString())
+                }
+            },
+            onFloor = vm::requestJumpTo,
+            onLoadMore = vm::loadMore,
+            onDismiss = { vm.cancelReaderNavigation(); onPanel(null) }
+        )
+    }
+    contextPost?.let { post ->
+        ReaderContextSheet(
+            floor = post.floor,
+            context = index.contextFor(post),
+            loading = vm.loadingMore || vm.locatingFloor > 0 || vm.refreshing,
+            message = vm.navigationMessage,
+            onLoadMissing = vm::loadUntilFloor,
+            onJump = vm::requestJumpTo,
+            onDismiss = { vm.cancelReaderNavigation(); contextPost = null }
+        ) { parent ->
+            val rule = folded[parent.id]
+            if (rule != null && parent.id !in unfolded) {
+                FoldedComment(parent, rule.value) { unfolded += parent.id }
+            } else {
+                CommentView(
+                    post = parent,
+                    onUser = { contextPost = null; onUser(it) },
+                    onOpenLink = onOpenLink,
+                    onQuote = if (canReply) ({ vm.quote(parent); contextPost = null }) else null,
+                    onLike = if (canReply) ({ vm.askLike(parent); contextPost = null }) else null,
+                    onShare = { onShare(parent); contextPost = null }
+                )
+            }
+        }
+    }
+}
 
 /** §5.2 作者行: identity only, at the head of the reading flow. */
 @Composable
@@ -1129,6 +1504,7 @@ private fun AuthorLine(post: Post, onUser: (Int) -> Unit) {
  * C: 正文直接接在作者信息下面, 左边缘 45dp. D: 热门标记只出现在已经热的评论上,
  * 颜色减弱. The row has no background of its own - the divider does the work.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CommentView(
     post: Post,
@@ -1136,7 +1512,8 @@ private fun CommentView(
     onOpenLink: (String) -> Unit,
     onQuote: (() -> Unit)? = null,
     onLike: (() -> Unit)? = null,
-    onShare: (() -> Unit)? = null
+    onShare: (() -> Unit)? = null,
+    onParent: (() -> Unit)? = null
 ) {
     val tokens = LocalTokens.current
     val hot = post.isHot
@@ -1173,7 +1550,10 @@ private fun CommentView(
                 }
             }
             Gap(2)
-            MetaRow {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
                 if (post.isOpening) {
                     MetaText("楼主", emphasis = true)
                 } else if (post.floor > 0) {
@@ -1181,7 +1561,14 @@ private fun CommentView(
                 }
                 if (post.parentFloor > 0) {
                     MetaDot()
-                    MetaText("回复 #${post.parentFloor}")
+                    Text(
+                        "回复 #${post.parentFloor}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tokens.accentGlow,
+                        modifier = if (onParent != null) Modifier.clickable(
+                            onClickLabel = "查看 #${post.parentFloor} 的上下文", onClick = onParent
+                        ).padding(vertical = 8.dp) else Modifier
+                    )
                 }
                 if (post.timeText.isNotBlank()) {
                     if (post.isOpening || post.floor > 0) MetaDot()
@@ -1232,8 +1619,7 @@ private fun CommentView(
                 Gap(9)
                 PostBody(
                     blocks = post.blocks,
-                    onLinkClick = onOpenLink,
-                    onImageClick = onOpenLink
+                    onLinkClick = onOpenLink
                 )
             }
         }

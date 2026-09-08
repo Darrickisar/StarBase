@@ -17,14 +17,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ImageSearch
+import StarBase.Android.Forum.ui.components.WritingIconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -32,15 +37,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Board
 import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.BoardTab
 import StarBase.Android.Forum.data.RankRowData
+import StarBase.Android.Forum.data.SearchEntry
+import StarBase.Android.Forum.data.SearchLibrary
+import StarBase.Android.Forum.data.SearchStore
+import StarBase.Android.Forum.data.Searches
 import StarBase.Android.Forum.data.TopicCard
 import StarBase.Android.Forum.data.UserStore
 import StarBase.Android.Forum.net.Api
+import StarBase.Android.Forum.net.SearchApi
+import StarBase.Android.Forum.net.SearchPage
 import StarBase.Android.Forum.net.Site
+import StarBase.Android.Forum.net.SiteException
 import StarBase.Android.Forum.ui.EmptyPanel
 import StarBase.Android.Forum.ui.ErrorPanel
 import StarBase.Android.Forum.ui.Freshness
@@ -66,6 +82,7 @@ import StarBase.Android.Forum.ui.glass.GlassChip
 import StarBase.Android.Forum.ui.glass.GlassField
 import StarBase.Android.Forum.ui.glass.GlassLevel
 import StarBase.Android.Forum.ui.glass.GlassPanel
+import StarBase.Android.Forum.ui.glass.GlassTabs
 import StarBase.Android.Forum.ui.glass.GlyphTile
 import StarBase.Android.Forum.ui.theme.LocalTokens
 import StarBase.Android.Forum.ui.theme.SbMetrics
@@ -100,53 +117,187 @@ enum class DiscoverEntry(
     LOTTERY("抽奖", "奖", "正在进行的抽奖", EntryWeight.MEDIUM),
     // §3.2 把这两项写成“仅显示名称”，所以它们本来就没有副说明。
     CARD("发卡", "卡", "", EntryWeight.QUIET),
-    GACHA("称号馆", "号", "", EntryWeight.QUIET)
+    GACHA("称号馆", "号", "", EntryWeight.QUIET),
+    COLLECTIONS("淘帖", "淘", "", EntryWeight.QUIET),
+    ESSENCE("申精", "精", "", EntryWeight.QUIET)
 }
 
 enum class EntryWeight { ANCHOR, MEDIUM, QUIET }
 
-class ExploreViewModel : ViewModel() {
+class ExploreViewModel(
+    private val fetchSearch: suspend (String, Int) -> SearchPage = SearchApi::search
+) : ViewModel() {
     var query by mutableStateOf("")
         private set
     var results by mutableStateOf<Load<List<TopicCard>>?>(null)
         private set
     var refreshing by mutableStateOf(false)
         private set
+    var loadingMore by mutableStateOf(false)
+        private set
+    var refreshError by mutableStateOf<Load.Failed?>(null)
+        private set
+    var moreError by mutableStateOf<Load.Failed?>(null)
+        private set
+    var nextPage by mutableStateOf<Int?>(null)
+        private set
+    var accountId by mutableStateOf(-1)
+        private set
+    var library by mutableStateOf(SearchLibrary())
+        private set
+    var searchNotice by mutableStateOf("")
+        private set
 
-    private var inFlight = false
+    private var searches: SearchStore? = null
+    private var requestJob: Job? = null
+    private var generation = 0L
+    private var receivedQuery: Pair<Int, Long>? = null
+    private var loginRevision = 0
+    private var awaitingLogin = false
 
-    fun updateQuery(value: String) { query = value }
+    fun receiveQuery(value: String, token: Long) {
+        val request = accountId to token
+        if (receivedQuery == request) return
+        val newInput = receivedQuery?.second != token
+        receivedQuery = request
+        if (newInput) updateQuery(value)
+        if (accountId > 0 && requestJob?.isActive != true) search()
+    }
+
+    fun bind(id: Int, storage: SearchStore? = null) {
+        val normalized = id.coerceAtLeast(0)
+        if (storage != null) searches = storage
+        if (normalized != accountId) {
+            val guestQuery = query.takeIf { accountId == 0 && normalized > 0 }
+            clearSearch()
+            accountId = normalized
+            if (guestQuery != null) query = guestQuery else awaitingLogin = false
+        }
+        library = searches?.load(accountId) ?: SearchLibrary()
+    }
+
+    fun prepareLogin() { awaitingLogin = true }
+
+    fun resumeAfterLogin(revision: Int) {
+        if (revision == loginRevision) return
+        loginRevision = revision
+        val failedPage = moreError?.kind == SiteException.Kind.AUTH
+        val needsRetry = awaitingLogin || failedPage || refreshError?.kind == SiteException.Kind.AUTH ||
+            (results as? Load.Failed)?.kind == SiteException.Kind.AUTH
+        awaitingLogin = false
+        if (accountId <= 0 || requestJob?.isActive == true || !needsRetry) return
+        if (failedPage && results is Load.Ready) loadMore() else search()
+    }
+
+    fun updateQuery(value: String) {
+        if (query == value) return
+        cancelRequest()
+        query = value
+        results = null
+        nextPage = null
+        searchNotice = ""
+    }
 
     fun search() {
         val q = query.trim()
-        if (q.isBlank()) return
-        if (inFlight) return
-        inFlight = true
-        viewModelScope.launch {
-            if (results !is Load.Ready) results = Load.Loading else refreshing = true
+        if (q.isEmpty()) return
+        query = q
+        updateLibrary(Searches.record(library, q, System.currentTimeMillis()))
+        fetch(page = 1, keepResults = false)
+    }
+
+    fun runSearch(value: String) {
+        updateQuery(value)
+        search()
+    }
+
+    fun refreshVisible() {
+        if (results != null && query.isNotBlank()) fetch(page = 1, keepResults = true)
+    }
+
+    fun loadMore() {
+        val page = nextPage ?: return
+        if (requestJob?.isActive == true || results !is Load.Ready) return
+        fetch(page, keepResults = true)
+    }
+
+    private fun fetch(page: Int, keepResults: Boolean) {
+        cancelRequest()
+        val token = generation
+        val q = query.trim()
+        val owner = accountId
+        val previous = (results as? Load.Ready)?.value
+        val append = page > 1
+        if (!keepResults || previous == null) results = Load.Loading
+        if (!keepResults) nextPage = null
+        refreshing = !append && keepResults && previous != null
+        loadingMore = append
+        requestJob = viewModelScope.launch {
             try {
-                results = Load.Ready(Api.search(q))
-            } catch (e: Throwable) {
-                if (results !is Load.Ready) results = failureOf(e)
+                val answer = fetchSearch(q, page)
+                currentCoroutineContext().ensureActive()
+                if (token != generation || q != query.trim() || owner != accountId) return@launch
+                val before = if (append) previous.orEmpty() else emptyList()
+                val rows = if (answer.page == page) answer.topics.distinctBy { it.id } else emptyList()
+                val merged = (before + rows).distinctBy { it.id }
+                results = Load.Ready(merged)
+                nextPage = answer.nextPage?.takeIf {
+                    it > page && rows.isNotEmpty() && merged.size > before.size
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (token != generation || owner != accountId) return@launch
+                val failure = failureOf(e)
+                when {
+                    append -> moreError = failure
+                    keepResults && previous != null -> refreshError = failure
+                    else -> results = failure
+                }
             } finally {
-                refreshing = false
-                inFlight = false
+                if (token == generation) {
+                    refreshing = false
+                    loadingMore = false
+                    requestJob = null
+                }
             }
         }
     }
 
-    /**
-     * A pull re-runs the search you are looking at. With no search on screen the
-     * page is just the five entries, which are static - so there is nothing to
-     * pull for and the gesture does nothing.
-     */
-    fun refreshVisible() {
-        if (results != null) search()
+    private fun cancelRequest() {
+        generation++
+        requestJob?.cancel()
+        requestJob = null
+        refreshing = false
+        loadingMore = false
+        refreshError = null
+        moreError = null
     }
 
     fun clearSearch() {
+        cancelRequest()
         query = ""
         results = null
+        nextPage = null
+        searchNotice = ""
+    }
+
+    fun saveSearch(value: String = query) {
+        val changed = Searches.save(library, value, System.currentTimeMillis())
+        searchNotice = if (changed == library && library.saved.size >= Searches.SAVED_CAP &&
+            library.saved.none { it.query == value.trim() }) "已保存搜索最多 ${Searches.SAVED_CAP} 条" else ""
+        updateLibrary(changed)
+    }
+
+    fun pinSearch(value: String) = updateLibrary(Searches.pin(library, value))
+    fun deleteSaved(value: String) = updateLibrary(Searches.removeSaved(library, value))
+    fun deleteHistory(value: String) = updateLibrary(Searches.removeHistory(library, value))
+    fun clearHistory() = updateLibrary(Searches.clearHistory(library))
+    fun clearSaved() = updateLibrary(Searches.clearSaved(library))
+
+    private fun updateLibrary(value: SearchLibrary) {
+        library = value
+        searches?.save(accountId, value)
     }
 }
 
@@ -158,10 +309,32 @@ fun ExploreScreen(
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onEntry: (DiscoverEntry) -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    accountId: Int = 0,
+    onBack: (() -> Unit)? = null,
+    initialQuery: String? = null,
+    queryToken: Long = 0L,
+    onRecognize: (() -> Unit)? = null,
+    loginRevision: Int = 0,
+    sessionReady: Boolean = true
 ) {
-    Refreshable(refreshing = vm.refreshing, onRefresh = vm::refreshVisible) {
-        ExploreList(vm, store, onTopic, onUser, onEntry, onLogin)
+    val context = LocalContext.current.applicationContext
+    val searches = remember(context) { SearchStore(context) }
+    LaunchedEffect(vm, accountId, searches, queryToken, loginRevision, sessionReady) {
+        if (!sessionReady) return@LaunchedEffect
+        vm.bind(accountId, searches)
+        initialQuery?.let { vm.receiveQuery(it, queryToken) }
+        vm.resumeAfterLogin(loginRevision)
+    }
+    if (!sessionReady || vm.accountId != accountId.coerceAtLeast(0)) {
+        LoadingMark()
+        return
+    }
+    Column(Modifier.fillMaxWidth()) {
+        if (onBack != null) DetailBar(title = "搜索社区", onBack = onBack)
+        Refreshable(refreshing = vm.refreshing, onRefresh = vm::refreshVisible) {
+            ExploreList(vm, store, onTopic, onUser, onEntry, { vm.prepareLogin(); onLogin() }, onBack == null, onRecognize)
+        }
     }
 }
 
@@ -172,14 +345,17 @@ private fun ExploreList(
     onTopic: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onEntry: (DiscoverEntry) -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    discovery: Boolean,
+    onRecognize: (() -> Unit)?
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
     // Cleared with the query: the hidden rows belong to one set of results.
     var revealBlocked by remember(vm.query) { mutableStateOf(false) }
+    var savedTab by remember(vm.accountId) { mutableStateOf(false) }
     val submit: () -> Unit = {
         keyboard?.hide()
-        vm.search()
+        if (vm.accountId > 0) vm.search() else onLogin()
     }
 
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -187,12 +363,33 @@ private fun ExploreList(
         // action on the title row, never a block of its own - and only while a
         // search is on screen, since nothing else here reloads.
         item("head") {
-            PageHead(
+            if (discovery) PageHead(
                 title = "发现",
                 action = if (vm.results != null) (if (vm.refreshing) "刷新中" else "刷新") else null,
                 onAction = vm::refreshVisible
             )
-            SearchRow(value = vm.query, onValue = vm::updateQuery, onSubmit = submit)
+            SearchRow(value = vm.query, onValue = vm::updateQuery, onSubmit = submit, onRecognize = onRecognize)
+            if (vm.accountId <= 0 && !discovery) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+                    horizontalArrangement = Arrangement.End) {
+                    LightAction("登录后搜索", onClick = onLogin)
+                }
+            }
+            if (vm.query.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    val saved = vm.library.saved.any { it.query == vm.query.trim() }
+                    LightAction(if (saved) "取消保存" else "保存搜索", onClick = {
+                        if (saved) vm.deleteSaved(vm.query) else vm.saveSearch()
+                    })
+                    LightAction("清空", onClick = vm::clearSearch)
+                }
+            }
+            if (vm.searchNotice.isNotEmpty()) {
+                Box(Modifier.padding(horizontal = SbMetrics.pagePadding)) { MetaText(vm.searchNotice) }
+            }
         }
 
         val results = vm.results
@@ -206,6 +403,11 @@ private fun ExploreList(
                     onTrailingClick = vm::clearSearch
                 )
                 Gap(4)
+            }
+            vm.refreshError?.let { failure ->
+                item("refresh-error") {
+                    ErrorPanel(failure.message, failure.kind, vm::refreshVisible, onLogin)
+                }
             }
             when (results) {
                 is Load.Loading -> item("results-loading") { LoadingMark("正在搜索") }
@@ -243,11 +445,64 @@ private fun ExploreList(
                     }
                 }
             }
+            if (results is Load.Ready && results.value.isNotEmpty()) {
+                item("results-more") {
+                    val failure = vm.moreError
+                    when {
+                        vm.loadingMore -> LoadingMark("正在加载更多")
+                        failure != null -> ErrorPanel(failure.message, failure.kind, vm::loadMore, onLogin)
+                        vm.nextPage != null -> Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            GlassButton("加载更多", onClick = vm::loadMore, enabled = !vm.refreshing)
+                        }
+                        !vm.refreshing -> Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            MetaText("已加载 ${results.value.size} 条结果")
+                        }
+                    }
+                }
+            }
             item("results-tail") { Gap(24) }
             return@LazyColumn
         }
 
-        item("entries") {
+        item("search-library-head") {
+            Gap(16)
+            GlassTabs(
+                labels = listOf("搜索历史", "已保存"),
+                selected = if (savedTab) 1 else 0,
+                onSelect = { savedTab = it == 1 },
+                modifier = Modifier.padding(horizontal = SbMetrics.pagePadding)
+            )
+            val entries = if (savedTab) vm.library.saved else vm.library.history
+            SectionHeader(
+                title = if (savedTab) "已保存搜索" else "最近搜索",
+                subtitle = "${entries.size} 条",
+                trailing = if (entries.isEmpty()) null else "清空",
+                onTrailingClick = { if (savedTab) vm.clearSaved() else vm.clearHistory() }
+            )
+            if (entries.isEmpty()) {
+                Box(Modifier.padding(horizontal = SbMetrics.pagePadding, vertical = 12.dp)) {
+                    MetaText(if (savedTab) "暂无保存的搜索" else "暂无搜索历史")
+                }
+            }
+        }
+        val entries = if (savedTab) vm.library.saved else vm.library.history
+        items(entries, key = { "search-${if (savedTab) "saved" else "history"}-${it.query}" }) { entry ->
+            SearchLibraryRow(
+                entry = entry,
+                saved = savedTab,
+                alreadySaved = vm.library.saved.any { it.query == entry.query },
+                onRun = { keyboard?.hide(); vm.runSearch(entry.query) },
+                onSave = { vm.saveSearch(entry.query) },
+                onPin = { vm.pinSearch(entry.query) },
+                onDelete = { if (savedTab) vm.deleteSaved(entry.query) else vm.deleteHistory(entry.query) }
+            )
+            Hairline(startInset = 16)
+        }
+
+        if (discovery) item("entries") {
             Gap(14)
             // §3.3 去掉重复性副说明: 副标题重写一遍下面五个入口的名字没有任何信息量。
             SectionHeader(title = "逛逛社区")
@@ -261,11 +516,44 @@ private fun ExploreList(
     }
 }
 
+@Composable
+private fun SearchLibraryRow(
+    entry: SearchEntry,
+    saved: Boolean,
+    alreadySaved: Boolean,
+    onRun: () -> Unit,
+    onSave: () -> Unit,
+    onPin: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding)) {
+        Text(
+            text = entry.query,
+            style = MaterialTheme.typography.bodyMedium,
+            color = LocalTokens.current.textPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "搜索", onClick = onRun).padding(vertical = 14.dp)
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (entry.pinned) MetaText("已置顶")
+            Spacer(Modifier.weight(1f))
+            if (saved) LightAction(if (entry.pinned) "取消置顶" else "置顶", onClick = onPin)
+            else if (!alreadySaved) LightAction("保存", onClick = onSave)
+            LightAction("删除", onClick = onDelete)
+        }
+    }
+}
+
 /**
  * §3.1 输入框与按钮同一行, 按钮宽度固定, 手机不换行.
  */
 @Composable
-private fun SearchRow(value: String, onValue: (String) -> Unit, onSubmit: () -> Unit) {
+private fun SearchRow(value: String, onValue: (String) -> Unit, onSubmit: () -> Unit, onRecognize: (() -> Unit)?) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -283,7 +571,8 @@ private fun SearchRow(value: String, onValue: (String) -> Unit, onSubmit: () -> 
             onSubmit = onSubmit
         )
         Spacer(Modifier.width(9.dp))
-        GlassButton(text = "搜索", onClick = onSubmit, modifier = Modifier.width(74.dp))
+        GlassButton(text = "搜索", onClick = onSubmit, enabled = value.isNotBlank(), modifier = Modifier.width(74.dp))
+        if (onRecognize != null) WritingIconButton(Icons.Outlined.ImageSearch, "截图求助", onClick = onRecognize)
     }
 }
 
@@ -308,9 +597,11 @@ private fun EntryMosaic(onEntry: (DiscoverEntry) -> Unit) {
                 MediumEntry(entry, Modifier.weight(1f)) { onEntry(entry) }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            quiet.forEach { entry ->
-                QuietEntry(entry, Modifier.weight(1f)) { onEntry(entry) }
+        quiet.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                row.forEach { entry ->
+                    QuietEntry(entry, Modifier.weight(1f)) { onEntry(entry) }
+                }
             }
         }
     }
@@ -381,7 +672,7 @@ private fun MediumEntry(entry: DiscoverEntry, modifier: Modifier, onClick: () ->
     }
 }
 
-/** 底部两个低权重入口: 只显示名称. */
+/** 底部低权重入口. */
 @Composable
 private fun QuietEntry(entry: DiscoverEntry, modifier: Modifier, onClick: () -> Unit) {
     val tokens = LocalTokens.current

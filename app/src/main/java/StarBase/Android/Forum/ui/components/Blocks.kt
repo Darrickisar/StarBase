@@ -14,12 +14,22 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.LinkAnnotation
@@ -27,6 +37,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -47,14 +58,24 @@ fun PostBody(
     blocks: List<LiveBlock>,
     modifier: Modifier = Modifier,
     onLinkClick: (String) -> Unit = {},
-    onImageClick: (String) -> Unit = {}
+    onImageClick: ((String) -> Unit)? = null
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
+    var image by remember { mutableStateOf<String?>(null) }
+    val inherited = LocalPostImages.current
+    val images = remember(inherited, blocks) {
+        (inherited + blocks.filter { it.type == LiveBlock.Type.IMAGE }.map { it.src }).distinct()
+    }
+    SelectionContainer {
+      Column(modifier = modifier.fillMaxWidth()) {
         blocks.forEachIndexed { index, block ->
             if (index > 0) Spacer(Modifier.height(gapBefore(block)))
-            BlockView(block, onLinkClick = onLinkClick, onImageClick = onImageClick)
+            BlockView(block, onLinkClick = onLinkClick, onImageClick = { src ->
+                if (onImageClick != null) onImageClick(src) else image = src
+            })
         }
+      }
     }
+    image?.let { ImageGallery(images, it) { image = null } }
 }
 
 /**
@@ -114,6 +135,7 @@ private fun LinkedText(
 private fun gapBefore(block: LiveBlock) = when (block.type) {
     LiveBlock.Type.HEADING -> 16.dp
     LiveBlock.Type.IMAGE -> 12.dp
+    LiveBlock.Type.VIDEO -> 12.dp
     LiveBlock.Type.CODE -> 12.dp
     LiveBlock.Type.QUOTE -> 12.dp
     LiveBlock.Type.RULE -> 16.dp
@@ -128,18 +150,23 @@ private fun BlockView(
     onImageClick: (String) -> Unit
 ) {
     val tokens = LocalTokens.current
+    val reader = LocalReaderPreferences.current
+    fun reading(style: TextStyle) = style.copy(
+        fontSize = style.fontSize * reader.fontScale,
+        lineHeight = style.lineHeight * reader.fontScale * reader.lineHeightScale
+    )
     when (block.type) {
         // §05: 13.5-14.5sp with a ~1.8 line height - bodyMedium is 14/25.
         LiveBlock.Type.PARA -> LinkedText(
             block = block,
-            style = MaterialTheme.typography.bodyMedium,
+            style = reading(MaterialTheme.typography.bodyMedium),
             color = tokens.textPrimary,
             onLinkClick = onLinkClick
         )
 
         LiveBlock.Type.HEADING -> LinkedText(
             block = block,
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            style = reading(MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)),
             color = tokens.textPrimary,
             onLinkClick = onLinkClick
         )
@@ -160,26 +187,34 @@ private fun BlockView(
             Spacer(Modifier.width(10.dp))
             LinkedText(
                 block = block,
-                style = MaterialTheme.typography.bodyMedium,
+                style = reading(MaterialTheme.typography.bodyMedium),
                 color = tokens.textSecondary,
                 onLinkClick = onLinkClick,
                 modifier = Modifier.weight(1f)
             )
         }
 
-        LiveBlock.Type.CODE -> Box(
+        LiveBlock.Type.CODE -> Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(tokens.codeBg)
                 .padding(12.dp)
         ) {
+            val clipboard = LocalClipboardManager.current
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(block.language.ifBlank { "代码" }, style = MaterialTheme.typography.labelSmall,
+                    color = tokens.textTertiary, modifier = Modifier.weight(1f))
+                IconButton(onClick = { clipboard.setText(AnnotatedString(block.text)) }) {
+                    Icon(Icons.Default.ContentCopy, "复制代码", tint = tokens.textSecondary)
+                }
+            }
             Text(
                 text = block.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp
+                    fontSize = 13.sp * reader.fontScale,
+                    lineHeight = 20.sp * reader.fontScale * reader.lineHeightScale
                 ),
                 color = tokens.textSecondary,
                 modifier = Modifier.horizontalScroll(rememberScrollState())
@@ -192,16 +227,18 @@ private fun BlockView(
             onClick = { onImageClick(block.src) }
         )
 
+        LiveBlock.Type.VIDEO -> VideoBlock(block)
+
         LiveBlock.Type.LIST_ITEM -> Row(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = "·",
-                style = MaterialTheme.typography.bodyMedium,
+                style = reading(MaterialTheme.typography.bodyMedium),
                 color = tokens.accentWarm
             )
             Spacer(Modifier.width(8.dp))
             LinkedText(
                 block = block,
-                style = MaterialTheme.typography.bodyMedium,
+                style = reading(MaterialTheme.typography.bodyMedium),
                 color = tokens.textPrimary,
                 onLinkClick = onLinkClick,
                 modifier = Modifier.weight(1f)
@@ -217,7 +254,7 @@ private fun BlockView(
 
         LiveBlock.Type.LINK -> Text(
             text = block.text,
-            style = MaterialTheme.typography.bodyMedium.copy(
+            style = reading(MaterialTheme.typography.bodyMedium).copy(
                 textDecoration = TextDecoration.Underline
             ),
             color = tokens.accentGlow,

@@ -8,6 +8,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /** Everything the client knows about where the site lives. */
 object Site {
@@ -175,13 +178,10 @@ object Net {
             // that on too - the half of 「打不开」 that DoH cannot reach, where the
             // address is right and the handshake is what gets cut. See [Frag].
             .socketFactory(SiteSockets)
-            // ECH. Only on a device that has the API - below Android 17 this leaves
-            // the client exactly as it was, default factory and all, rather than
-            // routing every handshake through a wrapper that could do nothing anyway.
-            // See [Ech]: it hides the name instead of cutting it up, which is what
-            // browsers have been doing all along.
+            // Bound TLS setup separately from response reads; enable ECH when available.
+            // SiteTls retains the platform socket type and default certificate validation.
             .apply {
-                val trust = if (Ech.available) Ech.trustManager() else null
+                val trust = Ech.trustManager()
                 if (trust != null) sslSocketFactory(SiteTls, trust)
             }
             .connectTimeout(15, TimeUnit.SECONDS)
@@ -195,7 +195,7 @@ object Net {
                 chain.request().tag(CronetAttempt::class.java)?.mayHaveSent = true
                 chain.proceed(chain.request())
             }
-            // QUIC/HTTP3, and only after TCP has already failed. A network that
+            // QUIC/HTTP3 after TCP fails, with short-lived reuse of a working route. A network that
             // resets the TCP handshake on the name in the ClientHello often leaves
             // UDP/443 alone, which is the one mitigation here that does not depend
             // on guessing what a middlebox does with fragments. See [CronetFallback].
@@ -214,6 +214,18 @@ object Net {
     }
 
     fun userAgent(): String = UA
+
+    /** Same DoH/TLS transport as native pages; the public CAP service needs no session cookies. */
+    internal fun capClient(context: android.content.Context): OkHttpClient = client.newBuilder()
+        .proxy(java.net.Proxy.NO_PROXY)
+        .cookieJar(CookieJar.NO_COOKIES)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(false)
+        .apply {
+            interceptors().removeAll { it is CronetFallbackInterceptor }
+            addInterceptor(CronetFallbackInterceptor(context = context.applicationContext, followRedirects = false))
+        }.build()
 
     private fun base(url: String): Request.Builder = Request.Builder()
         .url(url)
@@ -256,6 +268,31 @@ object Net {
         return execute(req)
     }
 
+    /** Uploads can be cancelled while connecting, sending bytes or awaiting the answer. */
+    suspend fun postBodyCancellable(url: String, body: okhttp3.RequestBody): String =
+        suspendCancellableCoroutine { continuation ->
+            val request = base(url).header("X-Requested-With", "XMLHttpRequest")
+                .header("Accept", "application/json")
+                .header("Origin", Site.BASE).post(body).build()
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(
+                        SiteException("上传连接中断：${e.message.orEmpty()}", SiteException.Kind.NETWORK)
+                    )
+                }
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    try {
+                        val text = readResponse(response)
+                        if (continuation.isActive) continuation.resume(text)
+                    } catch (e: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
+            })
+        }
+
     /** POST of an already-built form body. Blocking - call from IO. */
     fun postForm(url: String, body: okhttp3.FormBody, ajax: Boolean = true): String {
         val req = base(url)
@@ -280,7 +317,10 @@ object Net {
             throw SiteException("网络请求失败：${e.message ?: "未知原因"}", SiteException.Kind.NETWORK)
         }
 
-        resp.use {
+        return readResponse(resp)
+    }
+
+    private fun readResponse(resp: Response): String = resp.use {
             val text = try {
                 it.body?.string().orEmpty()
             } catch (e: java.io.IOException) {
@@ -296,7 +336,6 @@ object Net {
             if (!it.isSuccessful) {
                 throw SiteException("服务器返回 ${it.code}", SiteException.Kind.SERVER)
             }
-            return text
-        }
+            text
     }
 }

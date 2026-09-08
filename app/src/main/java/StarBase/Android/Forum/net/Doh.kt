@@ -598,7 +598,9 @@ class DohResolver(
     /** Drops what is remembered, without changing the setting. */
     fun forget() = state.cache.clear()
 
-    override fun lookup(hostname: String): List<InetAddress> {
+    override fun lookup(hostname: String): List<InetAddress> = lookup(hostname, retryChangedServer = true)
+
+    private fun lookup(hostname: String, retryChangedServer: Boolean): List<InetAddress> {
         val active = state
         if (!active.enabled || hostname.isBlank() || numeric(hostname)) return system.lookup(hostname)
         val known = active.cache[hostname]
@@ -622,6 +624,8 @@ class DohResolver(
         // is where the app goes looking for one that answers; it returns at once
         // and any switch lands on a later lookup.
         if (state === active) DohAuto.search(active.server)
+        // A replacement selected during this lookup must benefit this request too.
+        if (retryChangedServer && state !== active) return lookup(hostname, retryChangedServer = false)
         // Throws UnknownHostException of its own if the system cannot do it
         // either, which is the right ending: the caller sees a DNS failure.
         return stale(known, now) ?: system.lookup(hostname)

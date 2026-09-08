@@ -78,7 +78,8 @@ enum class MineEntry(val label: String, val glyph: String) {
 enum class LocalEntry(val label: String, val glyph: String, val hint: String) {
     WATCH("追帖", "追", "有新回复"),
     REMINDERS("提醒", "醒", "签到 · 开奖"),
-    BLOCKS("屏蔽", "屏", "关键词 · 用户")
+    BLOCKS("屏蔽", "屏", "关键词 · 用户"),
+    DRAFTS("草稿", "稿", "待发送")
 }
 
 @Composable
@@ -120,7 +121,7 @@ fun MineScreen(
 
         item("app") {
             Gap(18)
-            SectionHeader(title = "本机", subtitle = "不需要登录")
+            SectionHeader(title = "本机")
             Gap(10)
             LocalEntryRow(onEntry = onLocalEntry)
             Gap(8)

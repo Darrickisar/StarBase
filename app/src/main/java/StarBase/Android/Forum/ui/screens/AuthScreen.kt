@@ -41,6 +41,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -54,6 +57,7 @@ import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
 import StarBase.Android.Forum.net.SiteException
 import StarBase.Android.Forum.ui.components.StarTile
+import StarBase.Android.Forum.ui.components.CapCaptchaDialog
 import StarBase.Android.Forum.ui.glass.GlassBackAction
 import StarBase.Android.Forum.ui.glass.GlassButton
 import StarBase.Android.Forum.ui.glass.GlassField
@@ -69,19 +73,10 @@ import StarBase.Android.Forum.ui.theme.SbRadius
 /*
  * §07 登录/注册入口 - 独立账号页.
  *
- * The screen is native and so is the submission. linux.sb protects /login and
- * /register with a CSRF token, an arithmetic captcha bound to a signed token, a
- * SHA-256 proof of work, a honeypot field and a minimum form age - all of which
- * the app now satisfies itself: [Api.loginForm] reads the real page, the person
- * answers the real question, [Api.solvePow] does the work the page's own script
- * would have done, and [Api.login] posts the form.
- *
- * This used to drive an off-screen WebView instead, and the reason it no longer
- * does is the network rather than the code: a WebView has its own stack, so 域名解析
- * (DoH), 分片 and the Cronet QUIC fallback all missed it, and 「别的页面都好，只有
- * 登录打不开」 was the result. Going through OkHttp puts 登录 on the same three
- * mitigations as every other screen, and removes the loopback proxy that was only
- * ever there to reach the WebView.
+ * Credentials and submission use the native network client. CAP verification
+ * runs in a visible, isolated WebView using the site's own widget; only its
+ * one-use verification result returns to this form. Legacy arithmetic forms
+ * still render their question inline.
  *
  * The app posts the credentials but never stores them; what it keeps is the
  * session cookie, in the same CookieManager the OkHttp jar reads. Anything the
@@ -95,16 +90,21 @@ enum class AuthMode(
     val note: String,
     val action: String
 ) {
-    LOGIN("登录", "欢迎回来", "登录烧饼社区，继续你的内容。", "登录"),
-    REGISTER("注册", "创建账号", "注册烧饼账号，加入社区的讨论。", "注册")
+    LOGIN("登录", "欢迎回来", "登录 linux.sb，继续参与社区讨论。", "登录"),
+    REGISTER("注册", "创建账号", "注册 linux.sb 账号，加入社区讨论。", "注册")
 }
 
 @Composable
 fun AuthScreen(
     startAtRegister: Boolean = false,
-    onDone: (signedIn: Boolean) -> Unit
+    onDone: (signedIn: Boolean) -> Unit,
+    loginFormLoader: suspend (Boolean) -> Parse.LoginForm = { Api.loginForm(it) },
+    loginSubmitter: suspend (String, String, Parse.LoginForm, String, String, (String) -> Unit) -> Unit = Api::login,
+    captchaDocument: ((String) -> String)? = null
 ) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val tokens = LocalTokens.current
     val rise = with(LocalDensity.current) { 5.dp.roundToPx() }
     val scope = rememberCoroutineScope()
@@ -128,20 +128,22 @@ fun AuthScreen(
     var status by remember { mutableStateOf("") }
     var submitting by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf("") }
+    var verificationRevision by remember { mutableStateOf<Int?>(null) }
 
     /** Fetches the page for [target] and takes its captcha. */
-    fun loadForm(target: AuthMode) {
+    fun loadForm(target: AuthMode, clearHint: Boolean = true) {
         val revision = ++formRevision
         loadingForm = true
         form = null
         status = ""
         answer = ""
+        verificationRevision = null
         scope.launch {
             try {
-                val loaded = Api.loginForm(register = target == AuthMode.REGISTER)
+                val loaded = loginFormLoader(target == AuthMode.REGISTER)
                 if (revision != formRevision) return@launch
                 form = loaded
-                hint = ""
+                if (clearHint) hint = ""
             } catch (e: SiteException) {
                 if (revision != formRevision) return@launch
                 form = null
@@ -165,7 +167,7 @@ fun AuthScreen(
 
     fun refreshCaptcha() {
         val current = form ?: return loadForm(mode)
-        if (!current.captchaRequired) return loadForm(mode)
+        if (!current.captchaRequired) return loadForm(mode, clearHint = false)
         val revision = ++formRevision
         loadingForm = true
         answer = ""
@@ -203,7 +205,7 @@ fun AuthScreen(
         }
     }
 
-    fun submit() {
+    fun submit(capToken: String = "") {
         if (submitting || loadingForm) return
         val current = form
         val problem = when {
@@ -221,12 +223,19 @@ fun AuthScreen(
             hint = problem
             return
         }
+        if (current?.capChallenge != null && capToken.isBlank()) {
+            focusManager.clearFocus()
+            keyboard?.hide()
+            hint = ""
+            verificationRevision = formRevision
+            return
+        }
         hint = ""
         submitting = true
         scope.launch {
             try {
                 if (mode == AuthMode.LOGIN) {
-                    Api.login(user.trim(), pass, current!!, answer) { status = it }
+                    loginSubmitter(user.trim(), pass, current!!, answer, capToken) { status = it }
                     onDone(true)
                 } else {
                     Api.register(
@@ -236,7 +245,8 @@ fun AuthScreen(
                         email = mail.trim(),
                         emailCode = code,
                         form = current!!,
-                        answer = answer
+                        answer = answer,
+                        capToken = capToken
                     ) { status = it }
                     // The site signs nobody in on registration; it sends you to
                     // the login form, so the screen follows it there.
@@ -260,7 +270,7 @@ fun AuthScreen(
         }
     }
 
-    BackHandler { onDone(false) }
+    BackHandler { if (verificationRevision != null) verificationRevision = null else onDone(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -435,7 +445,7 @@ fun AuthScreen(
                 text = if (submitting) status.ifBlank { "正在提交…" } else mode.action,
                 onClick = { submit() },
                 enabled = !submitting && !loadingForm,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().testTag("auth-submit")
             )
 
             Spacer(Modifier.height(14.dp))
@@ -479,8 +489,7 @@ fun AuthScreen(
             }
 
             Spacer(Modifier.height(18.dp))
-            // OAuth leaves the site and comes back, which is a browser's job now
-            // that this screen has no WebView of its own.
+            // OAuth redirects are handled by the browser.
             OAuthRow(
                 onProvider = { provider ->
                     openInBrowser(context, "${Site.BASE}/oauth_login?provider=$provider")
@@ -516,6 +525,20 @@ fun AuthScreen(
             )
             Spacer(Modifier.height(28.dp))
         }
+    }
+    val cap = form?.capChallenge
+    val verification = verificationRevision
+    if (cap != null && verification != null) {
+        CapCaptchaDialog(
+            challenge = cap,
+            register = mode == AuthMode.REGISTER,
+            onSolved = { token ->
+                verificationRevision = null
+                if (verification == formRevision && !loadingForm) submit(token)
+            },
+            onDismiss = { verificationRevision = null },
+            document = captchaDocument
+        )
     }
 }
 

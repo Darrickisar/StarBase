@@ -47,6 +47,27 @@ import okio.buffer
  */
 internal class CronetAttempt { @Volatile var mayHaveSent = false }
 
+internal class CronetRouteMemory(private val now: () -> Long = System::nanoTime) {
+    private val routes = LinkedHashMap<String, Long>()
+
+    @Synchronized fun prefers(key: String): Boolean {
+        val until = routes[key] ?: return false
+        if (now() < until) return true
+        routes.remove(key)
+        return false
+    }
+
+    @Synchronized fun remember(key: String) {
+        routes[key] = now() + TimeUnit.MINUTES.toNanos(5)
+        if (routes.size > 64) routes.remove(routes.keys.first())
+    }
+
+    @Synchronized fun forget(key: String) { routes.remove(key) }
+    @Synchronized fun clear() { routes.clear() }
+}
+
+private val siteCronetRoutes = CronetRouteMemory()
+
 internal const val CRONET_RESPONSE_LIMIT = 32L * 1024 * 1024
 
 internal fun cronetAddressCandidates(addresses: List<java.net.InetAddress>): List<java.net.InetAddress> =
@@ -96,23 +117,63 @@ internal fun <T> awaitCronetResult(
     } finally { if (!completed) cancel() }
 }
 
-class CronetFallbackInterceptor(
-    private val cookieJar: CookieJar = CookieJar.NO_COOKIES,
-    private val dns: okhttp3.Dns = SiteDns,
-    private val context: android.content.Context,
+class CronetFallbackInterceptor internal constructor(
+    private val routes: CronetRouteMemory = CronetRouteMemory(),
+    private val policyKey: () -> String = { "" },
+    private val fallback: (Request, okhttp3.Call, Long) -> Response,
 ) : Interceptor {
+    constructor(
+        cookieJar: CookieJar = CookieJar.NO_COOKIES,
+        dns: okhttp3.Dns = SiteDns,
+        context: android.content.Context,
+        followRedirects: Boolean = true,
+    ) : this(
+        routes = siteCronetRoutes,
+        policyKey = {
+            val manager = context.applicationContext.getSystemService(android.net.ConnectivityManager::class.java)
+            val network = kotlin.runCatching { manager?.activeNetwork?.networkHandle }.getOrNull()
+            "$network|${SiteDns.enabled}|${SiteDns.server}|${Frag.enabled}"
+        },
+        fallback = CronetHttpTransport(cookieJar, dns, context.applicationContext, followRedirects)::execute,
+    )
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val attempt = CronetAttempt()
         val request = chain.request().newBuilder().tag(CronetAttempt::class.java, attempt).build()
+        if (request.url.scheme != "https") return chain.proceed(request)
+        val call = chain.call()
+        if (call.isCanceled()) throw IOException("Canceled")
+        val key = "${policyKey()}|${request.url.host}|${request.url.port}"
+        var preferredFailure: IOException? = null
+        if (request.method in setOf("GET", "HEAD") && request.body == null && routes.prefers(key)) {
+            try {
+                // A network change or blocked UDP must still leave time to try TCP.
+                return fallback(request, call, System.nanoTime() + TimeUnit.SECONDS.toNanos(8))
+            } catch (e: Exception) {
+                routes.forget(key)
+                if (e is InterruptedException) Thread.currentThread().interrupt()
+                val failure = e as? IOException ?: IOException("Cronet request failed", e)
+                if (call.isCanceled() || Thread.currentThread().isInterrupted ||
+                    !canRetryWithCronet(request, failure, true)) throw failure
+                preferredFailure = failure
+            }
+        }
         val failure = try {
-            return chain.proceed(request)
+            // TLS handshake waits are bounded separately by SiteTls; body timeouts stay intact.
+            return chain.withConnectTimeout(probeTimeout(chain.connectTimeoutMillis()), TimeUnit.MILLISECONDS)
+                .proceed(request).also { routes.forget(key) }
         } catch (e: IOException) {
             e
         }
+        if (preferredFailure != null) {
+            failure.addSuppressed(preferredFailure)
+            throw failure
+        }
         // 已取消的调用不重试；仅 https 可能走 QUIC（http 无绕过意义，直抛原错误）
-        if (chain.call().isCanceled() || !canRetryWithCronet(request, failure, attempt.mayHaveSent)) throw failure
+        if (call.isCanceled() || !canRetryWithCronet(request, failure, attempt.mayHaveSent)) throw failure
         return try {
-            executeWithCronet(request, chain.call())
+            fallback(request, call, System.nanoTime() + TimeUnit.SECONDS.toNanos(30))
+                .also { routes.remember(key) }
         } catch (e: Exception) {
             // 不记录完整 URL、查询参数或服务端异常详情（其中可能包含 token）。
             if (e is InterruptedException) Thread.currentThread().interrupt()
@@ -121,8 +182,16 @@ class CronetFallbackInterceptor(
         }
     }
 
-    private fun executeWithCronet(request: Request, call: okhttp3.Call): Response {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+    private fun probeTimeout(original: Int): Int = if (original == 0) 4_000 else minOf(original, 4_000)
+}
+
+private class CronetHttpTransport(
+    private val cookieJar: CookieJar,
+    private val dns: okhttp3.Dns,
+    private val context: android.content.Context,
+    private val followRedirects: Boolean,
+) {
+    fun execute(request: Request, call: okhttp3.Call, deadline: Long): Response {
         var current = withDefaultBrowserHeaders(request)
         var redirects = 0
         while (true) {
@@ -145,7 +214,7 @@ class CronetFallbackInterceptor(
                 }
             }
             val response = result ?: throw IOException("Cronet unavailable", last)
-            if (response.location == null) {
+            if (response.location == null || !followRedirects) {
                 return response.toResponse(current)
             }
             if (++redirects > MAX_REDIRECTS) throw IOException("Cronet 回退重定向次数超限")
@@ -264,6 +333,7 @@ internal object CronetTransport {
     }
 
     @Synchronized fun invalidate() {
+        siteCronetRoutes.clear()
         engines.values.forEach(::retire)
         engines.clear()
     }

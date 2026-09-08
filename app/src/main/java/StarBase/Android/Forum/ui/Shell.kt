@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -35,6 +36,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +48,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import StarBase.Android.Forum.vision.VisionScreen
+import StarBase.Android.Forum.speech.SpeechController
+import StarBase.Android.Forum.speech.SpeechPlayerBar
+import StarBase.Android.Forum.ui.components.LocalRecognizeImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.Reminder
@@ -65,6 +73,7 @@ import StarBase.Android.Forum.data.ProfileTab
 import StarBase.Android.Forum.ui.screens.DiscoverEntry
 import StarBase.Android.Forum.ui.screens.ExploreScreen
 import StarBase.Android.Forum.ui.screens.ExploreViewModel
+import StarBase.Android.Forum.ui.screens.SharedTextScreen
 import StarBase.Android.Forum.ui.screens.ForumListScreen
 import StarBase.Android.Forum.ui.screens.ForumListViewModel
 import StarBase.Android.Forum.ui.screens.ForumScreen
@@ -82,6 +91,13 @@ import StarBase.Android.Forum.ui.screens.MineEntry
 import StarBase.Android.Forum.ui.screens.MineScreen
 import StarBase.Android.Forum.ui.screens.NewTopicScreen
 import StarBase.Android.Forum.ui.screens.NewTopicViewModel
+import StarBase.Android.Forum.ui.screens.DraftsScreen
+import StarBase.Android.Forum.ui.screens.CollectionsScreen
+import StarBase.Android.Forum.ui.screens.EssenceScreen
+import StarBase.Android.Forum.ui.screens.TransferScreen
+import StarBase.Android.Forum.data.DraftKind
+import StarBase.Android.Forum.data.WritingDraft
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import StarBase.Android.Forum.ui.screens.NotificationsScreen
 import StarBase.Android.Forum.ui.screens.NotifyViewModel
 import StarBase.Android.Forum.ui.screens.PointsScreen
@@ -117,7 +133,10 @@ enum class Tab(val label: String, val glyph: NavGlyph) {
 
 /** Pushed screens. Tabs stay put; these stack on top. */
 sealed interface Route {
-    data class Topic(val id: Int) : Route
+    data class Search(val query: String, val token: Long = System.nanoTime()) : Route
+    data class SharedText(val text: String, val token: Long) : Route
+    data class Vision(val source: String? = null, val token: Long = System.nanoTime()) : Route
+    data class Topic(val id: Int, val page: Int = 1, val floor: Int = 0, val replyId: Int = 0, val draftId: String? = null) : Route
     data class Forum(val id: Int) : Route
     /**
      * A profile. [tab] is which of 主题 / 回帖 / 收藏 it opens on, so 我的回帖 is
@@ -135,9 +154,14 @@ sealed interface Route {
     data object Points : Route
     data object Messages : Route
     /** One private-message thread, keyed by the other person's user id. */
-    data class Thread(val partnerId: Int) : Route
+    data class Thread(val partnerId: Int, val draftId: String? = null) : Route
     /** 发新帖. [forumId] preselects a board when it comes from that board's page. */
-    data class NewTopic(val forumId: Int = 0) : Route
+    data class NewTopic(val forumId: Int = 0, val initialText: String = "", val draftId: String? = null,
+        val initialTitle: String = "", val initialImage: String = "", val token: Long = System.nanoTime()) : Route
+    data object Drafts : Route
+    data class Collections(val id: Int? = null, val topicId: Int? = null) : Route
+    data class Essence(val topicId: Int? = null) : Route
+    data object Transfer : Route
     data object Settings : Route
     /** 应用设置. App-local, so it opens signed out too. */
     data object AppSettings : Route
@@ -166,7 +190,10 @@ sealed interface Route {
  */
 private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     null -> "tab:${tab.name}"
-    is Route.Topic -> "topic:${route.id}"
+    is Route.Search -> "search:${route.token}"
+    is Route.SharedText -> "shared:${route.token}"
+    is Route.Vision -> "vision:${route.token}"
+    is Route.Topic -> "topic:${route.id}:${route.page}:${route.floor}:${route.replyId}:${route.draftId.orEmpty()}"
     is Route.Forum -> "forum:${route.id}"
     // The tab is part of the key: 我的主题 and 我的回帖 are two lists, and each
     // should come back to where it was left.
@@ -178,8 +205,12 @@ private fun screenKey(route: Route?, tab: Tab): String = when (route) {
     Route.Notifications -> "notifications"
     Route.Points -> "points"
     Route.Messages -> "messages"
-    is Route.Thread -> "thread:${route.partnerId}"
-    is Route.NewTopic -> "new-topic"
+    is Route.Thread -> "thread:${route.partnerId}:${route.draftId.orEmpty()}"
+    is Route.NewTopic -> "new-topic:${route.token}"
+    Route.Drafts -> "drafts"
+    is Route.Collections -> "collections:${route.id}:${route.topicId}"
+    is Route.Essence -> "essence:${route.topicId}"
+    Route.Transfer -> "transfer"
     Route.Settings -> "settings"
     Route.AppSettings -> "app-settings"
     Route.History -> "history"
@@ -193,10 +224,13 @@ fun Shell(
     store: UserStore,
     /** A topic a 本机提醒 asked to open, or 0. Consumed once. */
     openTopicId: Int = 0,
-    onTopicOpened: () -> Unit = {}
+    onTopicOpened: () -> Unit = {},
+    incoming: IncomingContent? = null,
+    onIncomingHandled: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val session: SessionViewModel = viewModel()
+    val nativeRoutes: NativeRouteStores = viewModel()
     val home: HomeViewModel = viewModel()
     val forumList: ForumListViewModel = viewModel()
     val forum: ForumViewModel = viewModel()
@@ -217,6 +251,7 @@ fun Shell(
     val update: UpdateViewModel = viewModel()
 
     var tab by remember { mutableStateOf(Tab.HOME) }
+    var loginRevision by rememberSaveable { mutableIntStateOf(0) }
     val stack = remember { mutableStateListOf<Route>() }
 
     // Scroll positions. Pushing a route disposes the screen underneath it, so
@@ -230,6 +265,9 @@ fun Shell(
     // hook runs once when the shell first resumes, so there is no separate
     // launch call that would ask the site the same thing twice.
     OnReturnToForeground { session.refreshIfStale() }
+    LaunchedEffect(session.resolved, session.me?.id) {
+        if (session.resolved) SpeechController.bindAccount(context, session.me?.id ?: 0)
+    }
 
     // 检查更新 on the schedule the user picked. Once per process and only if it
     // is owed, so 只手动检查 really means silent - see UpdateCheck.due.
@@ -255,6 +293,7 @@ fun Shell(
             delay(400)
             if (stack.none { screenKey(it, tab) == screenKey(closed, tab) }) {
                 screenState.removeState(screenKey(closed, tab))
+                nativeRoutes.remove(screenKey(closed, tab))
             }
         }
     }
@@ -292,17 +331,57 @@ fun Shell(
         if (stack.lastOrNull() !is Route.Login) push(Route.Login())
     }
 
-    /** Links inside post bodies: images and off-site links go to the browser. */
+    /** Route by parsed host and path, retaining the page and reply anchor. */
     fun openLink(url: String) {
         val abs = Site.absolute(url)
-        val topicId = Regex("""/topic/(\d+)""").find(abs)?.groupValues?.get(1)?.toIntOrNull()
+        val parsed = IncomingLinks.siteUrl(abs)?.toHttpUrlOrNull()
+        val address = IncomingLinks.topic(abs)
         when {
-            topicId != null -> openTopic(topicId)
+            address != null -> {
+                store.recordVisit(address.id)
+                push(Route.Topic(address.id, address.page, address.floor, address.replyId))
+            }
             // 登录/注册 written as an ordinary link still uses the app's entry.
             isSiteAuthUrl(abs) -> push(Route.Login(register = abs.contains("/register")))
-            abs.startsWith(Site.BASE) -> openSitePage("网页", abs)
+            parsed?.pathSegments?.firstOrNull() == "topic_collections" -> push(Route.Collections())
+            parsed?.pathSegments?.firstOrNull() == "topic_essence_review_list" -> push(Route.Essence())
+            parsed?.pathSegments?.firstOrNull() == "topic_collection" ->
+                push(Route.Collections(parsed.pathSegments.getOrNull(1)?.toIntOrNull()))
+            parsed?.pathSegments?.firstOrNull() == "user" -> parsed.pathSegments.getOrNull(1)?.toIntOrNull()?.let(::openUser)
+            parsed?.pathSegments?.firstOrNull() == "forum" -> parsed.pathSegments.getOrNull(1)?.toIntOrNull()?.let { push(Route.Forum(it)) }
+            parsed != null -> openSitePage("网页", parsed.toString())
             else -> openInBrowser(context, abs)
         }
+    }
+
+    fun resumeDraft(draft: WritingDraft) {
+        when (draft.kind) {
+            DraftKind.NEW_TOPIC -> push(Route.NewTopic(draft.forumId, draftId = draft.id))
+            DraftKind.REPLY -> push(Route.Topic(draft.targetId, draftId = draft.id))
+            DraftKind.DM -> push(Route.Thread(draft.targetId, draftId = draft.id))
+        }
+    }
+
+    fun openSearch(text: String) {
+        val query = IncomingLinks.selected(text)?.search ?: return
+        push(Route.Search(query))
+        if (!session.checking && session.me == null) push(Route.Login())
+    }
+
+    LaunchedEffect(incoming?.token, session.checking, session.resolved) {
+        val content = incoming ?: return@LaunchedEffect
+        if (content.search.isNotBlank()) {
+            if (!session.resolved || session.checking) {
+                if (!session.checking) session.refreshIfStale()
+                return@LaunchedEffect
+            }
+            openSearch(content.search)
+        } else if (content.image.isNotBlank()) push(Route.Vision(content.image))
+        else if (content.url.isNotBlank()) openLink(content.url)
+        else if (content.text.isNotBlank()) {
+            push(Route.SharedText(content.text, content.token))
+        }
+        onIncomingHandled()
     }
 
     // A 开奖提醒 that was tapped. Handled here rather than in the Activity so it
@@ -362,10 +441,13 @@ fun Shell(
 
     // One ambient room behind everything: every glass surface below repaints its
     // own slice of it, which is what makes the panels read as the same material.
+    CompositionLocalProvider(LocalRecognizeImage provides { source -> push(Route.Vision(source)) }) {
     AmbientRoom {
         Scaffold(
             containerColor = Color.Transparent,
             bottomBar = {
+                Column {
+                SpeechPlayerBar(::openTopic)
                 if (stack.isEmpty()) {
                     BottomBar(
                         current = tab,
@@ -378,6 +460,7 @@ fun Shell(
                             if (picked == Tab.MINE) session.refreshIfStale()
                         }
                     )
+                }
                 }
             }
         ) { padding ->
@@ -417,10 +500,12 @@ fun Shell(
                                 tab = tab,
                                 store = store,
                                 session = session,
+                                loginRevision = loginRevision,
                                 home = home,
                                 forumList = forumList,
                                 explore = explore,
                                 onTopic = ::openTopic,
+                                onRecognize = { push(Route.Vision()) },
                                 onForum = { push(Route.Forum(it)) },
                                 onUser = ::openUser,
                                 onAllForums = { tab = Tab.FORUMS },
@@ -439,6 +524,8 @@ fun Shell(
                                             tab = Tab.HOME
                                         }
                                         entry == DiscoverEntry.RANK -> push(Route.Rank)
+                                        entry == DiscoverEntry.COLLECTIONS -> push(Route.Collections())
+                                        entry == DiscoverEntry.ESSENCE -> push(Route.Essence())
                                         // 称号馆 is a signed-in page: the site answers a
                                         // guest with a redirect to its own login form.
                                         else -> requireSignIn { push(Route.Gacha) }
@@ -483,6 +570,7 @@ fun Shell(
                                         LocalEntry.WATCH -> push(Route.Watch)
                                         LocalEntry.REMINDERS -> push(Route.Reminders)
                                         LocalEntry.BLOCKS -> push(Route.Blocks)
+                                        LocalEntry.DRAFTS -> push(Route.Drafts)
                                     }
                                 },
                                 onLogin = { push(Route.Login()) },
@@ -520,7 +608,14 @@ fun Shell(
                                     onRegister = { push(Route.Login(register = true)) },
                                     onOpenLink = ::openLink,
                                     onSetDrawReminder = ::setDrawReminder,
-                                    onCancelDrawReminder = ::cancelDrawReminder
+                                    onCancelDrawReminder = ::cancelDrawReminder,
+                                    accountId = session.me?.id ?: 0,
+                                    draftId = route.draftId,
+                                    initialPage = route.page,
+                                    initialFloor = route.floor,
+                                    initialReplyId = route.replyId,
+                                    onCollections = { requireSignIn { push(Route.Collections(topicId = route.id)) } },
+                                    onEssence = { push(Route.Essence(route.id)) }
                                 )
                             }
 
@@ -602,9 +697,38 @@ fun Shell(
                                     pop()
                                 },
                                 onUser = ::openUser,
-                                onLogin = { push(Route.Login()) }
+                                onLogin = { push(Route.Login()) },
+                                accountId = session.me?.id ?: 0,
+                                draftId = route.draftId
                             )
 
+                            is Route.Search -> CompositionLocalProvider(
+                                LocalViewModelStoreOwner provides nativeRoutes.owner(screenKey(route, tab))
+                            ) { ExploreScreen(
+                                vm = viewModel(key = "native-search:${route.token}"),
+                                store = store, onTopic = ::openTopic, onUser = ::openUser,
+                                onEntry = {}, onLogin = { push(Route.Login()) },
+                                accountId = session.me?.id ?: 0, onBack = ::pop,
+                                initialQuery = route.query, queryToken = route.token,
+                                loginRevision = loginRevision, sessionReady = session.resolved && !session.checking
+                            ) }
+                            is Route.Vision -> CompositionLocalProvider(
+                                LocalViewModelStoreOwner provides nativeRoutes.owner(screenKey(route, tab))
+                            ) { VisionScreen(
+                                source = route.source, onBack = ::pop, onSearch = ::openSearch,
+                                onDraft = { draft ->
+                                    push(Route.NewTopic(initialText = draft.body, initialTitle = draft.title,
+                                        initialImage = draft.imageUri.orEmpty()))
+                                    if (session.me == null) push(Route.Login())
+                                }
+                            ) }
+                            is Route.SharedText -> SharedTextScreen(
+                                text = route.text, onBack = ::pop, onSearch = ::openSearch,
+                                onDraft = { value ->
+                                    push(Route.NewTopic(initialText = value))
+                                    if (session.me == null) push(Route.Login())
+                                }
+                            )
                             is Route.NewTopic -> NewTopicScreen(
                                 vm = newTopic,
                                 forumId = route.forumId,
@@ -617,7 +741,32 @@ fun Shell(
                                     if (topicId > 0) openTopic(topicId)
                                 },
                                 onLogin = { push(Route.Login()) },
-                                onOpenSite = { openSitePage("发新帖", it) }
+                                onOpenSite = { openSitePage("发新帖", it) },
+                                accountId = session.me?.id ?: 0,
+                                initialText = route.initialText,
+                                initialTitle = route.initialTitle,
+                                initialImage = route.initialImage,
+                                draftId = route.draftId,
+                                onDrafts = { push(Route.Drafts) }
+                            )
+
+                            Route.Drafts -> DraftsScreen(
+                                accountId = session.me?.id ?: 0, onBack = ::pop,
+                                onResume = ::resumeDraft, onLogin = { push(Route.Login()) }
+                            )
+                            is Route.Collections -> CollectionsScreen(
+                                onBack = ::pop, onTopic = ::openTopic, onLogin = { push(Route.Login()) },
+                                onOpenLink = { openSitePage("淘帖", it) }, signedIn = session.signedIn,
+                                userId = session.me?.id ?: 0, initialCollectionId = route.id,
+                                initialTopicId = route.topicId
+                            )
+                            is Route.Essence -> EssenceScreen(
+                                onBack = ::pop, onTopic = ::openTopic, onLogin = { push(Route.Login()) },
+                                onOpenLink = { openSitePage("申精", it) }, signedIn = session.signedIn,
+                                userId = session.me?.id ?: 0, initialTopicId = route.topicId
+                            )
+                            Route.Transfer -> TransferScreen(
+                                store = store, accountId = session.me?.id ?: 0, onBack = ::pop
                             )
 
                             Route.History -> HistoryScreen(
@@ -671,7 +820,9 @@ fun Shell(
                                 onHistory = { push(Route.History) },
                                 onWatch = { push(Route.Watch) },
                                 onReminders = { push(Route.Reminders) },
-                                onBlocks = { push(Route.Blocks) }
+                                onBlocks = { push(Route.Blocks) },
+                                onTransfer = { push(Route.Transfer) },
+                                onDrafts = { push(Route.Drafts) }
                             )
 
                             is Route.Login -> AuthScreen(
@@ -679,6 +830,7 @@ fun Shell(
                                 onDone = { signedIn ->
                                     pop()
                                     if (signedIn) {
+                                        loginRevision++
                                         session.refresh()
                                         home.load(force = true)
                                     }
@@ -700,15 +852,19 @@ fun Shell(
     }
 }
 
+}
+
 @Composable
 private fun TabContent(
     tab: Tab,
     store: UserStore,
     session: SessionViewModel,
+    loginRevision: Int,
     home: HomeViewModel,
     forumList: ForumListViewModel,
     explore: ExploreViewModel,
     onTopic: (Int) -> Unit,
+    onRecognize: () -> Unit,
     onForum: (Int) -> Unit,
     onUser: (Int) -> Unit,
     onAllForums: () -> Unit,
@@ -746,7 +902,10 @@ private fun TabContent(
                 onTopic = onTopic,
                 onUser = onUser,
                 onEntry = onDiscoverEntry,
-                onLogin = onLogin
+                onLogin = onLogin,
+                accountId = session.me?.id ?: 0,
+                onRecognize = onRecognize,
+                loginRevision = loginRevision, sessionReady = session.resolved && !session.checking
             )
 
             Tab.MINE -> MineScreen(

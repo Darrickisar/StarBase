@@ -1,5 +1,6 @@
 package StarBase.Android.Forum.ui.screens
 
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -7,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -32,22 +34,32 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import StarBase.Android.Forum.data.BlockRule
 import StarBase.Android.Forum.data.Conversation
 import StarBase.Android.Forum.data.Filters
 import StarBase.Android.Forum.data.DirectMessage
 import StarBase.Android.Forum.data.NotifyItem
+import StarBase.Android.Forum.data.NotificationFilter
+import StarBase.Android.Forum.data.NotificationGroup
+import StarBase.Android.Forum.data.NotificationGroups
 import StarBase.Android.Forum.data.Profile
 import StarBase.Android.Forum.data.ProfileTab
 import StarBase.Android.Forum.data.UserStore
+import StarBase.Android.Forum.data.DraftKind
+import StarBase.Android.Forum.ui.components.DraftComposer
 import StarBase.Android.Forum.net.Api
 import StarBase.Android.Forum.net.Parse
 import StarBase.Android.Forum.net.Site
@@ -85,31 +97,60 @@ import StarBase.Android.Forum.ui.theme.SbRadius
 
 // ---- 通知 --------------------------------------------------------------------
 
-class NotifyViewModel : ViewModel() {
+class NotifyViewModel(
+    private val fetchNotifications: suspend (Int) -> List<NotifyItem> = Api::notifications,
+    now: () -> Long = SystemClock::elapsedRealtime
+) : ViewModel() {
     var state by mutableStateOf<Load<List<NotifyItem>>>(Load.Loading)
         private set
     var refreshing by mutableStateOf(false)
         private set
+    var refreshError by mutableStateOf<Load.Failed?>(null)
+        private set
+    var filter by mutableStateOf(NotificationFilter.ALL)
+        private set
+    var expandedKeys by mutableStateOf(emptySet<String>())
+        private set
 
-    private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS)
+    private val fresh = Freshness(windowMs = Freshness.BADGE_WINDOW_MS, now = now)
     private var inFlight = false
+    private var loadJob: Job? = null
+    private var generation = 0L
 
     /**
      * Whose notifications these are. The list is a tab on your own profile, so
      * there is nothing to fetch until the session says who that is.
      */
-    private var userId = 0
+    var userId by mutableStateOf(0)
+        private set
 
     val ageSeconds: Long get() = fresh.ageSeconds
+    val groups: List<NotificationGroup>
+        get() = NotificationGroups.group((state as? Load.Ready)?.value.orEmpty(), filter)
+
+    fun selectFilter(value: NotificationFilter) { filter = value }
+
+    fun toggleGroup(key: String) {
+        expandedKeys = if (key in expandedKeys) expandedKeys - key else expandedKeys + key
+    }
 
     /**
      * Points this at a user. Signing in as someone else drops what is on screen
      * rather than showing the previous account's notifications under the new name.
      */
     fun bind(id: Int) {
-        if (id == userId) return
-        userId = id
+        val normalized = id.coerceAtLeast(0)
+        if (normalized == userId) return
+        generation++
+        loadJob?.cancel()
+        loadJob = null
+        inFlight = false
+        refreshing = false
+        refreshError = null
+        userId = normalized
         state = Load.Loading
+        filter = NotificationFilter.ALL
+        expandedKeys = emptySet()
         fresh.invalidate()
     }
 
@@ -119,22 +160,29 @@ class NotifyViewModel : ViewModel() {
         if (inFlight) return
         inFlight = true
         val requested = userId
-        viewModelScope.launch {
+        val token = ++generation
+        refreshError = null
+        loadJob = viewModelScope.launch {
             // Only blank the screen on the first load; a refresh keeps the list
             // visible so it does not flash empty.
             if (state !is Load.Ready) state = Load.Loading else refreshing = true
             try {
-                val items = Api.notifications(requested)
-                if (requested != userId) return@launch
+                val items = fetchNotifications(requested)
+                currentCoroutineContext().ensureActive()
+                if (requested != userId || token != generation) return@launch
                 state = Load.Ready(items)
+                expandedKeys = expandedKeys.intersect(NotificationGroups.group(items).map { it.key }.toSet())
                 fresh.mark()
-            } catch (e: Throwable) {
-                if (requested != userId) return@launch
-                if (state !is Load.Ready) state = failureOf(e)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (requested != userId || token != generation) return@launch
+                if (state !is Load.Ready) state = failureOf(e) else refreshError = failureOf(e)
             } finally {
-                if (requested == userId) {
+                if (requested == userId && token == generation) {
                     refreshing = false
                     inFlight = false
+                    loadJob = null
                 }
             }
         }
@@ -142,7 +190,7 @@ class NotifyViewModel : ViewModel() {
 
     /** Opening the screen always re-reads: the badge is why you came here. */
     fun openOrRefresh() {
-        if (state !is Load.Ready || fresh.stale) load(force = true)
+        load(force = true)
     }
 }
 
@@ -157,40 +205,132 @@ fun NotificationsScreen(
 ) {
     // The list is a tab on your own profile, so it cannot be fetched before the
     // session has resolved who you are.
-    LaunchedEffect(userId) { if (userId > 0) vm.bind(userId) }
+    val account = if (signedIn) userId.coerceAtLeast(0) else 0
+    LaunchedEffect(vm, account) { vm.bind(account) }
     // Covers both the first appearance and every return to the foreground.
-    OnReturnToForeground(signedIn to userId) { if (signedIn && userId > 0) vm.openOrRefresh() }
+    OnReturnToForeground(signedIn to userId) {
+        vm.bind(account)
+        if (account > 0) vm.openOrRefresh()
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         DetailBar(
             title = "通知",
-            subtitle = if (signedIn) freshnessText(vm.ageSeconds, vm.refreshing) else "",
+            subtitle = if (account > 0 && vm.userId == account && vm.state is Load.Ready) {
+                freshnessText(vm.ageSeconds, vm.refreshing)
+            } else "",
             onBack = onBack,
             action = "刷新",
-            onAction = { vm.load(force = true) }
+            onAction = { vm.bind(account); if (account > 0) vm.load(force = true) }
         )
         if (!signedIn) {
             SignInPrompt("登录后查看通知", onLogin)
             return@Column
         }
-        when (val s = vm.state) {
-            is Load.Loading -> LoadingMark()
-            is Load.Failed -> ErrorPanel(s.message, s.kind, { vm.load(force = true) }, onLogin)
-            is Load.Ready -> Refreshable(
-                refreshing = vm.refreshing,
-                onRefresh = { vm.load(force = true) }
-            ) {
-                if (s.value.isEmpty()) {
-                    EmptyPanel("没有新通知")
-                } else {
-                    LazyColumn {
-                        itemsIndexed(s.value, key = { i, n -> "$i-${n.text.take(24)}" }) { index, item ->
-                            if (index > 0) Hairline(startInset = 16)
-                            NotifyRow(item) { if (item.href.isNotBlank()) onOpenHref(item.href) }
-                        }
-                        item("tail") { Gap(24) }
+        if (account <= 0 || vm.userId != account) {
+            LoadingMark()
+            return@Column
+        }
+        GlassTabs(
+            labels = NotificationFilter.entries.map { it.label },
+            selected = NotificationFilter.entries.indexOf(vm.filter),
+            onSelect = { vm.selectFilter(NotificationFilter.entries[it]) },
+            modifier = Modifier.padding(horizontal = SbMetrics.pagePadding, vertical = 8.dp)
+        )
+        Refreshable(refreshing = vm.refreshing, onRefresh = { vm.load(force = true) }) {
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                vm.refreshError?.let { failure ->
+                    item("refresh-error") {
+                        ErrorPanel(failure.message, failure.kind, { vm.load(force = true) }, onLogin)
                     }
                 }
+                when (val s = vm.state) {
+                    is Load.Loading -> item("loading") { LoadingMark() }
+                    is Load.Failed -> item("error") {
+                        ErrorPanel(s.message, s.kind, { vm.load(force = true) }, onLogin)
+                    }
+                    is Load.Ready -> {
+                        val groups = vm.groups
+                        if (groups.isEmpty()) {
+                            item("empty") {
+                                EmptyPanel(when (vm.filter) {
+                                    NotificationFilter.ALL -> "暂无通知"
+                                    NotificationFilter.UNREAD -> "暂无未读通知"
+                                    NotificationFilter.MENTIONS -> "暂无提及"
+                                })
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                    SmallAction("刷新", primary = false, onClick = { vm.load(force = true) })
+                                    if (vm.filter != NotificationFilter.ALL) {
+                                        Spacer(Modifier.width(12.dp))
+                                        SmallAction("查看全部", primary = false, onClick = {
+                                            vm.selectFilter(NotificationFilter.ALL)
+                                        })
+                                    }
+                                }
+                            }
+                        } else {
+                            item("summary") {
+                                SectionHeader(
+                                    "${groups.sumOf { it.items.size }} 条通知",
+                                    subtitle = "${groups.sumOf { it.unreadCount }} 条未读"
+                                )
+                            }
+                            groups.forEach { group ->
+                                val expanded = group.items.size == 1 || group.key in vm.expandedKeys
+                                item("group-${group.key}") {
+                                    NotificationGroupHead(group, expanded) { vm.toggleGroup(group.key) }
+                                }
+                                if (expanded) {
+                                    itemsIndexed(group.items, key = { index, _ -> "row-${group.key}-$index" }) { _, item ->
+                                        NotifyRow(item) { if (item.href.isNotBlank()) onOpenHref(item.href) }
+                                    }
+                                }
+                                item("divider-${group.key}") { Hairline(startInset = 16) }
+                            }
+                        }
+                    }
+                }
+                item("tail") { Gap(24) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationGroupHead(group: NotificationGroup, expanded: Boolean, onToggle: () -> Unit) {
+    val tokens = LocalTokens.current
+    val collapsible = group.items.size > 1
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .then(if (collapsible) Modifier.semantics {
+                stateDescription = if (expanded) "已展开" else "已收起"
+            }.clickable(onClickLabel = if (expanded) "收起通知" else "展开通知", onClick = onToggle) else Modifier)
+            .padding(horizontal = SbMetrics.pagePadding, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                group.topicId?.let { "主题 #$it" } ?: "通知",
+                style = MaterialTheme.typography.titleSmall,
+                color = tokens.textPrimary
+            )
+            Gap(4)
+            MetaText("${group.items.size} 条" + if (group.unreadCount > 0) " · ${group.unreadCount} 条未读" else "")
+            if (!expanded) {
+                Gap(6)
+                Text(
+                    group.items.first().text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = tokens.textSecondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                group.items.first().timeText.takeIf { it.isNotBlank() }?.let { MetaText(it) }
+            }
+        }
+        if (collapsible) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                Text(if (expanded) "-" else "+", style = MaterialTheme.typography.titleLarge, color = tokens.textSecondary)
             }
         }
     }
@@ -202,7 +342,7 @@ private fun NotifyRow(item: NotifyItem, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = item.href.isNotBlank(), onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.Top
     ) {
@@ -530,6 +670,8 @@ class ThreadViewModel : ViewModel() {
         private set
 
     private var partnerId = 0
+    private var accountId = 0
+    private var identityGeneration = 0
 
     /** A thread collects replies while it is open, so this window is short. */
     private val fresh = Freshness(windowMs = 45_000L)
@@ -540,8 +682,8 @@ class ThreadViewModel : ViewModel() {
 
     val ageSeconds: Long get() = fresh.ageSeconds
 
-    fun open(id: Int) {
-        if (id == partnerId && state is Load.Ready) {
+    fun open(id: Int, accountId: Int = this.accountId) {
+        if (id == partnerId && accountId == this.accountId && state is Load.Ready) {
             if (fresh.stale) load()
             return
         }
@@ -549,6 +691,9 @@ class ThreadViewModel : ViewModel() {
         loadJob = null
         inFlight = false
         partnerId = id
+        this.accountId = accountId
+        identityGeneration++
+        sending = false
         notice = ""
         fresh.invalidate()
         load(initial = true)
@@ -562,18 +707,20 @@ class ThreadViewModel : ViewModel() {
         if (inFlight || partnerId == 0) return
         inFlight = true
         val requested = partnerId
+        val generation = identityGeneration
         loadJob = viewModelScope.launch {
             if (initial) state = Load.Loading else refreshing = true
             try {
                 val thread = Api.thread(requested)
-                if (requested != partnerId) return@launch
+                if (requested != partnerId || generation != identityGeneration) return@launch
                 state = Load.Ready(thread)
                 fresh.mark()
             } catch (e: Throwable) {
-                if (requested != partnerId) return@launch
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (requested != partnerId || generation != identityGeneration) return@launch
                 if (state !is Load.Ready) state = failureOf(e) else notice = e.message.orEmpty()
             } finally {
-                if (requested == partnerId) {
+                if (requested == partnerId && generation == identityGeneration) {
                     refreshing = false
                     inFlight = false
                 }
@@ -582,25 +729,32 @@ class ThreadViewModel : ViewModel() {
     }
 
     /** Sends, then re-reads so the sent message comes from the server. */
-    fun send(text: String, onSent: () -> Unit) {
+    fun send(text: String, onSent: () -> Unit, expectedAccountId: Int = 0) {
         if (sending || text.isBlank()) return
         sending = true
+        val requested = partnerId
+        val generation = identityGeneration
         viewModelScope.launch {
             try {
-                val result = Api.sendMessage(partnerId, text)
-                notice = result.message
+                if (expectedAccountId > 0) check(Api.me()?.id == expectedAccountId) { "登录账号已变化，请重新打开编辑器" }
+                val result = Api.sendMessage(requested, text)
                 onSent()
-                fresh.invalidate()
-                load()
+                if (requested == partnerId && generation == identityGeneration) {
+                    notice = result.message
+                    fresh.invalidate()
+                    load()
+                }
             } catch (e: Throwable) {
-                notice = e.message ?: "私信发送失败"
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (requested == partnerId && generation == identityGeneration) notice = e.message ?: "私信发送失败"
             } finally {
-                sending = false
+                if (requested == partnerId && generation == identityGeneration) sending = false
             }
         }
     }
 
     fun clearNotice() { notice = "" }
+    fun showNotice(value: String) { notice = value }
 }
 
 @Composable
@@ -609,9 +763,11 @@ fun ThreadScreen(
     vm: ThreadViewModel,
     onBack: () -> Unit,
     onUser: (Int) -> Unit,
-    onLogin: () -> Unit
+    onLogin: () -> Unit,
+    accountId: Int = 0,
+    draftId: String? = null
 ) {
-    LaunchedEffect(partnerId) { vm.open(partnerId) }
+    LaunchedEffect(partnerId, accountId) { vm.open(partnerId, accountId) }
     OnReturnToForeground(partnerId) { vm.refreshIfStale() }
 
     val thread = (vm.state as? Load.Ready)?.value
@@ -656,10 +812,11 @@ fun ThreadScreen(
                         }
                     }
                 }
-                ComposeBar(
-                    sending = vm.sending,
-                    partner = s.value.partner,
-                    onSend = { text, done -> vm.send(text) { done() } }
+                if (accountId > 0) DraftComposer(
+                    accountId = accountId, kind = DraftKind.DM, targetId = partnerId, draftId = draftId,
+                    sending = vm.sending, placeholder = "发给 ${s.value.partner}",
+                    onNotice = vm::showNotice,
+                    onSend = { text, _, done -> vm.send(text, done, accountId) }
                 )
             }
         }

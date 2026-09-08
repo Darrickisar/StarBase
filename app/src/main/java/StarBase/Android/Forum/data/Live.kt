@@ -107,7 +107,7 @@ data class Post(
      */
     val plainText: String
         get() = blocks
-            .filter { it.type != LiveBlock.Type.IMAGE }
+            .filter { it.type != LiveBlock.Type.IMAGE && it.type != LiveBlock.Type.VIDEO }
             .map { it.text.trim() }
             .filter { it.isNotEmpty() }
             .joinToString("\n")
@@ -127,9 +127,14 @@ data class LiveBlock(
      * href away at parse time, which is why every in-post link was dead text. These
      * carry it through to the renderer instead.
      */
-    val links: List<Link> = emptyList()
+    val links: List<Link> = emptyList(),
+    val poster: String = "",
+    val mediaType: String = "",
+    val embedded: Boolean = false,
+    val headingLevel: Int = 0,
+    val language: String = ""
 ) {
-    enum class Type { PARA, HEADING, QUOTE, CODE, IMAGE, LIST_ITEM, RULE, LINK }
+    enum class Type { PARA, HEADING, QUOTE, CODE, IMAGE, VIDEO, LIST_ITEM, RULE, LINK }
 
     /** One anchor inside a block's text: `text.substring(start, end)` is its label. */
     data class Link(val start: Int, val end: Int, val href: String)

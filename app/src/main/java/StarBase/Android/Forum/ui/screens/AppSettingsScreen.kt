@@ -245,7 +245,9 @@ fun AppSettingsScreen(
     onHistory: () -> Unit,
     onWatch: () -> Unit,
     onReminders: () -> Unit,
-    onBlocks: () -> Unit
+    onBlocks: () -> Unit,
+    onTransfer: () -> Unit = {},
+    onDrafts: () -> Unit = {}
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { vm.autoCheck(store) }
@@ -257,6 +259,13 @@ fun AppSettingsScreen(
             onBack = onBack
         )
         LazyColumn {
+            item("writing-and-transfer") {
+                Row(Modifier.fillMaxWidth().padding(horizontal = SbMetrics.pagePadding, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    GlassButton("草稿箱", onDrafts, modifier = Modifier.weight(1f), primary = false)
+                    GlassButton("本机数据迁移", onTransfer, modifier = Modifier.weight(1f), primary = false)
+                }
+            }
             item("update") { Gap(12); UpdateCard(store = store, vm = vm) }
             item("dns") { Gap(12); DnsCard(store = store) }
             item("frag") { Gap(12); FragCard(store = store) }
@@ -1203,7 +1212,7 @@ private fun AboutCard(onOpenReleases: () -> Unit) {
         CardTitle(text = "关于", tail = "v${BuildConfig.VERSION_NAME}")
         Gap(6)
         Text(
-            text = "烧饼社区的第三方 Android 客户端，内容实时来自 linux.sb。" +
+            text = "StarBase 是 linux.sb 的第三方 Android 客户端，内容实时来自社区。" +
                 "登录表单由网站自己处理，App 不保存你的密码。",
             style = MaterialTheme.typography.bodySmall,
             color = tokens.textSecondary
